@@ -43,6 +43,17 @@ export type {
 export const inject = ['remote', 'remote.settings']
 
 /**
+ * Whether Connection published a declared non-loopback authority for this
+ * deployment. Absent on a loopback-only server and in unit fixtures, which
+ * keeps those pages on the process-local default.
+ * @returns true when the page authority passed the deployment's /api fence.
+ */
+function servesDeclaredAuthority(): boolean {
+  return (globalThis as { readonly __DSH_CONNECTION_SERVES_REMOTE__?: unknown })
+    .__DSH_CONNECTION_SERVES_REMOTE__ === true
+}
+
+/**
  * Provide the settings-namespace scope service over one shared describe
  * mirror, and keep that mirror fresh on the two signals that can move the
  * settings document: a document commit and a (re)connect.
@@ -55,7 +66,10 @@ export function apply(ctx: Context): void {
   const schema = new SettingsSchemaService(ctx)
   // Resolved once here, where `remote` is declared in this plugin's own
   // `inject`; the binder hands the same answer to every scope it binds.
-  const persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory'
+  // A page served from an authority this deployment declares already passed
+  // Connection's /api fence and browser authentication, so it may own the Host
+  // settings document; only a page with no such authority stays process-local.
+  const persistence = (ctx.remote.$host.isLoopback || servesDeclaredAuthority()) ? 'host' : 'memory'
   const mirror = new SettingsDescribeMirror(ctx, persistence)
   ctx.effect(() => {
     const disposers = [

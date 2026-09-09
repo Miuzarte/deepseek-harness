@@ -120,6 +120,14 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
     assertImageBodyCapacity(webCtx, maxRequestBodyBytes)
     webCtx.on('webserver/index-inject', (table) => {
       table.push({ kind: 'global', name: '__DSH_CONNECTION_RECOVERY__', value: recovery })
+      // A non-loopback page is reachable only through an authority this
+      // deployment declares, and this plugin's fence plus browser
+      // authentication already gate its /api access. Publish that fact so
+      // ui-settings can keep such a page's preferences in the Host document
+      // instead of process memory.
+      if (trustedHosts.length > 0) {
+        table.push({ kind: 'global', name: '__DSH_CONNECTION_SERVES_REMOTE__', value: true })
+      }
     })
     const fetchHandler = connection.createSharedFetchHandler(API_PATH)
     const route: WebRoute = {

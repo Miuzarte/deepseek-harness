@@ -147,6 +147,20 @@ describe('connection node half', () => {
     }
   })
 
+  it('publishes the declared remote-authority fact only with a trusted host', async () => {
+    const remote = await mounted({ trustedHosts: ['harness.example'] })
+    try {
+      const rows: IndexInjection[] = []
+      remote.ctx.emit('webserver/index-inject', rows)
+      expect(rows).toEqual([
+        { kind: 'global', name: '__DSH_CONNECTION_RECOVERY__', value: expect.any(Object) },
+        { kind: 'global', name: '__DSH_CONNECTION_SERVES_REMOTE__', value: true },
+      ])
+    } finally {
+      await remote.dispose()
+    }
+  })
+
   it.each([
     { recovery: { backoffBaseMs: 0 }, error: /backoffBaseMs/ },
     { recovery: { backoffFactor: NaN }, error: /backoffFactor.*finite/ },
