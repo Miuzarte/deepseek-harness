@@ -1,3 +1,5 @@
+# 参见 [[patch.md]](./patch.md)
+
 # DeepSeek Harness
 
 [English](README.md) | 中文
