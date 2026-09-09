@@ -3,7 +3,7 @@
 import { runInNewContext } from 'node:vm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bootThemeInjection } from '../src/boot-theme.ts'
-import type { ThemePreference } from '../src/theme-settings.ts'
+import { LOCAL_THEME_STORAGE_KEY, type ThemePreference } from '../src/theme-settings.ts'
 
 const DARK_ATTRIBUTE = 'data-ds-dark-theme'
 
@@ -14,12 +14,13 @@ function mockSystemDark(matches: boolean): void {
 function executeBootstrap(preference?: ThemePreference, fontSize?: number): void {
   const row = bootThemeInjection(preference, fontSize)
   if (row.kind !== 'script') throw new Error('theme bootstrap row is not a script')
-  runInNewContext(row.text, { document, matchMedia: globalThis.matchMedia })
+  runInNewContext(row.text, { document, matchMedia: globalThis.matchMedia, localStorage })
 }
 
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  localStorage.clear()
   document.documentElement.style.removeProperty('color-scheme')
   document.body.removeAttribute(DARK_ATTRIBUTE)
   document.body.style.removeProperty('--dsh-content-font-size')
@@ -66,5 +67,29 @@ describe('theme bootstrap row', () => {
     expect(document.body.style.getPropertyValue('--dsh-content-font-size')).toBe('17px')
     executeBootstrap('light')
     expect(document.body.style.getPropertyValue('--dsh-content-font-size')).toBe('14px')
+  })
+
+  it('prefers this browser stored override over the embedded fallback', () => {
+    mockSystemDark(false)
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, JSON.stringify({ preference: 'dark', fontSize: 17 }))
+    executeBootstrap('light', 12)
+    expect(document.documentElement.style.colorScheme).toBe('dark')
+    expect(document.body.hasAttribute(DARK_ATTRIBUTE)).toBe(true)
+    expect(document.body.style.getPropertyValue('--dsh-content-font-size')).toBe('17px')
+  })
+
+  it('falls back per field when the stored override carries junk', () => {
+    mockSystemDark(false)
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, JSON.stringify({ preference: 'sepia', fontSize: 99 }))
+    executeBootstrap('dark', 16)
+    expect(document.documentElement.style.colorScheme).toBe('dark')
+    expect(document.body.style.getPropertyValue('--dsh-content-font-size')).toBe('16px')
+  })
+
+  it('ignores an unreadable stored override', () => {
+    mockSystemDark(false)
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, '{not json')
+    executeBootstrap('light', 15)
+    expect(document.body.style.getPropertyValue('--dsh-content-font-size')).toBe('15px')
   })
 })

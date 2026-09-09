@@ -52,11 +52,11 @@ describe('ui-theme host', () => {
     const rows = collect(ctx)
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ kind: 'script', placement: 'body' })
-    expect(scriptText(rows[0])).toContain('const preference = "system"')
-    expect(scriptText(rows[0])).toContain('"14px"')
+    expect(scriptText(rows[0])).toContain('const fallbackPreference = "system"')
+    expect(scriptText(rows[0])).toContain('const fallbackFontSize = 14')
     await ctx.settings.update(THEME_SETTINGS_NAMESPACE, { preference: 'dark', fontSize: 17 })
-    expect(scriptText(collect(ctx)[0])).toContain('const preference = "dark"')
-    expect(scriptText(collect(ctx)[0])).toContain('"17px"')
+    expect(scriptText(collect(ctx)[0])).toContain('const fallbackPreference = "dark"')
+    expect(scriptText(collect(ctx)[0])).toContain('const fallbackFontSize = 17')
     await fiber.dispose()
     expect(collect(ctx)).toEqual([])
   })
@@ -64,7 +64,7 @@ describe('ui-theme host', () => {
   it('uses the system preference without a settings provider', async () => {
     const ctx = new Context()
     await ctx.plugin({ apply }).await()
-    expect(scriptText(collect(ctx)[0])).toContain('const preference = "system"')
+    expect(scriptText(collect(ctx)[0])).toContain('const fallbackPreference = "system"')
   })
 
   it('falls back to the schema default while the theme namespace holds no section', async () => {
@@ -73,6 +73,6 @@ describe('ui-theme host', () => {
     const ctx = new Context()
     ctx.provide('settings', { register: () => () => {}, get: () => undefined } as never)
     await ctx.plugin({ apply }).await()
-    expect(scriptText(collect(ctx)[0])).toContain('const preference = "system"')
+    expect(scriptText(collect(ctx)[0])).toContain('const fallbackPreference = "system"')
   })
 })

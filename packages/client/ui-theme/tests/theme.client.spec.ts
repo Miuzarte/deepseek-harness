@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { stubSettingsScope, type StubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
 import type {
@@ -8,6 +8,7 @@ import type {
   ThemeTokenOverrides,
 } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
+import { LOCAL_THEME_STORAGE_KEY } from '@deepseek-ai/dsh-client-ui-theme'
 
 const make = (host = stubSettingsScope<ThemeSettings>()): {
   ctx: Context
@@ -22,6 +23,11 @@ const make = (host = stubSettingsScope<ThemeSettings>()): {
 }
 
 describe('ThemeRuntime', () => {
+  // The runtime reads and writes this browser's stored override, which jsdom
+  // shares across the cases in this file.
+  beforeEach(() => { localStorage.clear() })
+  afterEach(() => { localStorage.clear() })
+
   it('defaults to the system preference resolved against prefers-color-scheme', () => {
     const { theme } = make()
     const snapshot = theme.getTheme()
@@ -46,40 +52,39 @@ describe('ThemeRuntime', () => {
     }
   })
 
-  it('setFontSize switches, writes through the scope, and republishes; same value is a no-op', () => {
-    const { theme, events, host } = make()
+  it('setFontSize switches, stores this browser override, and republishes; same value is a no-op', () => {
+    const { theme, events } = make()
     theme.setFontSize(17)
     expect(theme.getTheme().fontSize).toBe(17)
-    expect(host.set).toHaveBeenCalledWith('fontSize', 17)
+    expect(JSON.parse(localStorage.getItem(LOCAL_THEME_STORAGE_KEY) ?? 'null')).toEqual({ fontSize: 17 })
     expect(events).toHaveLength(1)
     theme.setFontSize(17)
     expect(events).toHaveLength(1)
-    expect(host.set).toHaveBeenCalledOnce()
   })
 
   it('rejects out-of-range and fractional font sizes', () => {
-    const { theme, events, host } = make()
+    const { theme, events } = make()
     for (const px of [11, 18, 14.5, Number.NaN]) {
       expect(() => { theme.setFontSize(px) }).toThrow('outside 12..17')
     }
     expect(events).toHaveLength(0)
-    expect(host.set).not.toHaveBeenCalled()
+    expect(localStorage.getItem(LOCAL_THEME_STORAGE_KEY)).toBeNull()
   })
 
-  it('adopts a published Host font size without writing it back', () => {
+  it('adopts a published Host font size without storing an override', () => {
     const { theme, events, host } = make()
     host.publish({ status: 'ready', value: { preference: 'system', fontSize: 12 }, revision: 1, writable: true })
     expect(theme.getTheme().fontSize).toBe(12)
     expect(events).toHaveLength(1)
-    expect(host.set).not.toHaveBeenCalled()
+    expect(localStorage.getItem(LOCAL_THEME_STORAGE_KEY)).toBeNull()
   })
 
-  it('setTheme switches, writes through the scope, republishes, and keeps DOM untouched', () => {
-    const { theme, events, host } = make()
+  it('setTheme switches, stores this browser override, republishes, and keeps DOM untouched', () => {
+    const { theme, events } = make()
     theme.setTheme('dark')
     expect(theme.getTheme().preference).toBe('dark')
     expect(theme.getTheme().active.colorScheme).toBe('dark')
-    expect(host.set).toHaveBeenCalledWith('preference', 'dark')
+    expect(JSON.parse(localStorage.getItem(LOCAL_THEME_STORAGE_KEY) ?? 'null')).toEqual({ preference: 'dark' })
     expect(events).toHaveLength(1)
     expect(events[0]).toBe(theme.getTheme())
     // The service never touches presentation state.
@@ -87,15 +92,14 @@ describe('ThemeRuntime', () => {
     // Same-value set is a no-op (no extra event).
     theme.setTheme('dark')
     expect(events).toHaveLength(1)
-    expect(host.set).toHaveBeenCalledOnce()
   })
 
-  it('adopts a published Host section without writing it back', () => {
+  it('adopts a published Host section without storing an override', () => {
     const { theme, events, host } = make()
     host.publish({ status: 'ready', value: { preference: 'dark', fontSize: 14 }, revision: 1, writable: true })
     expect(theme.getTheme().preference).toBe('dark')
     expect(events).toHaveLength(1)
-    expect(host.set).not.toHaveBeenCalled()
+    expect(localStorage.getItem(LOCAL_THEME_STORAGE_KEY)).toBeNull()
     host.publish({ value: { preference: 'dark', fontSize: 14 }, revision: 2 })
     expect(events).toHaveLength(1)
   })
@@ -107,6 +111,52 @@ describe('ThemeRuntime', () => {
     expect(theme.getTheme().preference).toBe('dark')
   })
 
+  it('prefers this browser stored override over the published Host section', () => {
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, JSON.stringify({ fontSize: 17 }))
+    const host = stubSettingsScope<ThemeSettings>()
+    host.publish({ status: 'ready', value: { preference: 'dark', fontSize: 12 }, revision: 1, writable: true })
+    const { theme } = make(host)
+    expect(theme.getTheme().fontSize).toBe(17)
+    expect(theme.getTheme().preference).toBe('dark')
+    // A later Host section still cannot displace the stored font size.
+    host.publish({ value: { preference: 'light', fontSize: 13 }, revision: 2 })
+    expect(theme.getTheme().fontSize).toBe(17)
+    expect(theme.getTheme().preference).toBe('light')
+  })
+
+  it('ignores a stored override that is not a usable object or carries no usable field', () => {
+    for (const stored of ['[]', 'null', '"dark"', '{}', JSON.stringify({ preference: 'sepia', fontSize: 99 })]) {
+      localStorage.setItem(LOCAL_THEME_STORAGE_KEY, stored)
+      const { theme } = make()
+      expect(theme.getTheme().preference).toBe('system')
+      expect(theme.getTheme().fontSize).toBe(14)
+    }
+  })
+
+  it('ignores an unreadable stored override', () => {
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, '{not json')
+    expect(make().theme.getTheme().fontSize).toBe(14)
+  })
+
+  it('merges each stored field without dropping the other', () => {
+    const { theme } = make()
+    theme.setTheme('dark')
+    theme.setFontSize(17)
+    expect(JSON.parse(localStorage.getItem(LOCAL_THEME_STORAGE_KEY) ?? 'null'))
+      .toEqual({ preference: 'dark', fontSize: 17 })
+  })
+
+  it('keeps the in-memory value when storage refuses the write', () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+    try {
+      const { theme } = make()
+      theme.setFontSize(17)
+      expect(theme.getTheme().fontSize).toBe(17)
+    } finally {
+      setItem.mockRestore()
+    }
+  })
+
   it('throws on unknown setTheme ids, duplicate registration, and the system id', () => {
     const { theme } = make()
     expect(() => { theme.setTheme('sepia') }).toThrow('not registered')
@@ -115,7 +165,7 @@ describe('ThemeRuntime', () => {
   })
 
   it('registered themes join the snapshot; disposing the active one resets to default', () => {
-    const { theme, events, host } = make()
+    const { theme, events } = make()
     const dispose = theme.register({ id: 'sepia', colorScheme: 'light', tokens: { '--dsw-alias-bg-base': 'red' } })
     expect(theme.getTheme().themes.map(t => t.id)).toEqual(['light', 'dark', 'sepia'])
     theme.setTheme('sepia')
@@ -124,8 +174,8 @@ describe('ThemeRuntime', () => {
     expect(theme.getTheme().preference).toBe('system')
     expect(theme.getTheme().themes.map(t => t.id)).toEqual(['light', 'dark'])
     // Custom ids are in-process extension themes; only the built-in product
-    // preferences cross the Host settings schema.
-    expect(host.set).not.toHaveBeenCalled()
+    // preferences reach this browser's stored override.
+    expect(localStorage.getItem(LOCAL_THEME_STORAGE_KEY)).toBeNull()
     // register + set + dispose = three publishes; disposer is idempotent.
     expect(events.length).toBe(3)
     dispose()

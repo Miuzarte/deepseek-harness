@@ -132,7 +132,8 @@ describe('ui-theme apply', () => {
     face.setTheme('system')
     expect(theme.getTheme().preference).toBe('system')
     expect(instance.getSnapshot().preference).toBe('system')
-    await vi.waitFor(() => { expect(b.mutate).toHaveBeenCalledTimes(2) })
+    // Appearance writes stay in this browser; the Host document is untouched.
+    expect(b.mutate).not.toHaveBeenCalled()
   })
 
   it('projects font-size snapshots into its row store and routes face writes back', async () => {
@@ -150,7 +151,8 @@ describe('ui-theme apply', () => {
     face.setFontSize(12)
     expect(theme.getTheme().fontSize).toBe(12)
     expect(instance.getSnapshot().fontSize).toBe(12)
-    await vi.waitFor(() => { expect(b.mutate).toHaveBeenCalledTimes(2) })
+    // Appearance writes stay in this browser; the Host document is untouched.
+    expect(b.mutate).not.toHaveBeenCalled()
   })
 
   it('loads Host settings at boot, refreshes its namespace, and keeps remote browsers process-local', async () => {

@@ -2,10 +2,12 @@
  * Browser theme registry over the `--dsw-*` token stylesheets. The service
  * owns the live theme preference (light/dark/system), resolves `system` through
  * `prefers-color-scheme`, and publishes immutable snapshots; it never touches
- * the DOM — ui-layout's presenter consumes the resolved snapshot. The Host
- * settings scope loads and stores the preference in the user-settings
- * document. The plugin also registers the Appearance preference row into the
- * settings General section — the theme feature owns its own settings surface.
+ * the DOM — ui-layout's presenter consumes the resolved snapshot. Writes land
+ * in this browser's `localStorage`, so one person's desktop and phone keep
+ * different font sizes; the Host settings section stays the deployment default
+ * a browser inherits until it stores a value of its own. The plugin also
+ * registers the Appearance preference row into the settings General section —
+ * the theme feature owns its own settings surface.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
@@ -25,7 +27,7 @@ import { installThemeStyles } from './styles.ts'
 import { en, zh, type ThemeKey } from './locales.ts'
 import {
   DEFAULT_FONT_SIZE, DEFAULT_PREFERENCE, FONT_SIZE_FIELD, FONT_SIZE_MAX, FONT_SIZE_MIN,
-  isThemePreference, THEME_PREFERENCE_FIELD, THEME_SETTINGS_NAMESPACE,
+  isThemePreference, LOCAL_THEME_STORAGE_KEY, THEME_PREFERENCE_FIELD, THEME_SETTINGS_NAMESPACE,
   type ThemePreference, type ThemeSettings,
 } from '../theme-settings.ts'
 
@@ -158,6 +160,8 @@ const BUILTIN_INSPECT_TOKENS: readonly ThemeTokenInspection[] = Object.freeze([
 export class ThemeRuntime {
   private readonly ctx: ClientContext
   private readonly host: SettingsScope<ThemeSettings>
+  /** This browser's stored override; absent until it stores a value of its own. */
+  private local: Partial<ThemeSettings> | undefined = readLocalTheme()
   private themes: ThemeDefinition[] = [...BUILTIN_THEMES]
   private preference: ThemePreference
   private fontSize: number = bootstrapFontSize()
@@ -171,7 +175,7 @@ export class ThemeRuntime {
   /**
    * @param ctx - owning context (change events are emitted on it; the
    * media-query and scope listeners are released through ctx.effect on dispose).
-   * @param host - durable preference scope owned by the same plugin.
+   * @param host - deployment fallback scope this browser inherits until it stores its own value.
    */
   constructor(ctx: ClientContext, host: SettingsScope<ThemeSettings>) {
     this.ctx = ctx
@@ -224,8 +228,8 @@ export class ThemeRuntime {
 
   /**
    * Switch the theme preference — the only user preference write entry.
-   * Built-in preferences are written through the settings scope and every
-   * accepted value emits `theme/change`.
+   * Built-in preferences are stored in this browser and every accepted value
+   * emits `theme/change`.
    * @param id - a registered theme id or `system`; unknown ids throw.
    */
   setTheme(id: string): void {
@@ -234,14 +238,13 @@ export class ThemeRuntime {
     }
     if (this.preference === id) return
     this.preference = id as ThemePreference
-    if (isThemePreference(id)) void this.host.set(THEME_PREFERENCE_FIELD, id)
+    if (isThemePreference(id)) this.persistLocal({ [THEME_PREFERENCE_FIELD]: id })
     this.publish()
   }
 
   /**
    * Change the conversation content font size — the only font-size write
-   * entry. Accepted values are written through the settings scope and emit
-   * `theme/change`.
+   * entry. Accepted values are stored in this browser and emit `theme/change`.
    * @param px - integer px within FONT_SIZE_MIN..FONT_SIZE_MAX; out-of-range or fractional values throw.
    */
   setFontSize(px: number): void {
@@ -250,18 +253,30 @@ export class ThemeRuntime {
     }
     if (this.fontSize === px) return
     this.fontSize = px
-    void this.host.set(FONT_SIZE_FIELD, px)
+    this.persistLocal({ [FONT_SIZE_FIELD]: px })
     this.publish()
   }
 
-  /** Adopt the scope's accepted durable preference without writing it back. */
+  /**
+   * Adopt this browser's stored override, falling back per field to the
+   * deployment scope's accepted value, without writing anything back.
+   */
   private adopt(): void {
     const section = this.host.getSnapshot().value
-    if (section === undefined) return
-    if (this.preference === section.preference && this.fontSize === section.fontSize) return
-    this.preference = section.preference
-    this.fontSize = section.fontSize
+    // The last fallback is the live value, so the font size the boot script
+    // already painted survives a Host answer that carries no section.
+    const preference = this.local?.preference ?? section?.preference ?? this.preference
+    const fontSize = this.local?.fontSize ?? section?.fontSize ?? this.fontSize
+    if (this.preference === preference && this.fontSize === fontSize) return
+    this.preference = preference
+    this.fontSize = fontSize
     this.publish()
+  }
+
+  /** Merge one override field into this browser's stored entry and persist it. */
+  private persistLocal(patch: Partial<ThemeSettings>): void {
+    this.local = { ...this.local, ...patch }
+    writeLocalTheme(this.local)
   }
 
   /**
@@ -355,6 +370,49 @@ export class ThemeRuntime {
     this.revision += 1
     this.snapshot = this.buildSnapshot()
     this.ctx.emit('theme/change', this.snapshot)
+  }
+}
+
+/**
+ * Read this browser's stored appearance override. An absent, unreadable, or
+ * malformed entry leaves the deployment section in charge; a partial entry
+ * overrides only the fields it carries.
+ * @returns the validated override, or undefined when this browser stored none.
+ */
+function readLocalTheme(): Partial<ThemeSettings> | undefined {
+  if (typeof localStorage === 'undefined') return undefined
+  let parsed: unknown
+  try {
+    const raw = localStorage.getItem(LOCAL_THEME_STORAGE_KEY)
+    if (raw === null) return undefined
+    parsed = JSON.parse(raw)
+  } catch (_unreadable) {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const candidate = parsed as Record<string, unknown>
+  const stored: Partial<ThemeSettings> = {}
+  const preference = candidate[THEME_PREFERENCE_FIELD]
+  if (isThemePreference(preference)) stored.preference = preference
+  const fontSize = candidate[FONT_SIZE_FIELD]
+  if (typeof fontSize === 'number' && Number.isInteger(fontSize)
+    && fontSize >= FONT_SIZE_MIN && fontSize <= FONT_SIZE_MAX) {
+    stored.fontSize = fontSize
+  }
+  return Object.keys(stored).length === 0 ? undefined : stored
+}
+
+/**
+ * Store this browser's appearance override. A refused write (private mode, full
+ * quota) leaves the value in memory only, so the page still honors it.
+ * @param section - override fields to merge into the stored entry.
+ */
+function writeLocalTheme(section: Partial<ThemeSettings>): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, JSON.stringify(section))
+  } catch (_storageRefused) {
+    // The in-memory value already applies to this page.
   }
 }
 

@@ -14,6 +14,14 @@ export const THEME_PREFERENCE_FIELD = 'preference'
 /** Field carrying the conversation content font size. */
 export const FONT_SIZE_FIELD = 'fontSize'
 
+/**
+ * Browser `localStorage` key holding this browser's appearance override. The
+ * Host section stays the deployment default a browser inherits on first use;
+ * a value written here outranks it for that browser alone, so one person's
+ * desktop and phone keep different font sizes.
+ */
+export const LOCAL_THEME_STORAGE_KEY = 'dsh.theme'
+
 /** Theme preference persisted by the product Appearance row. */
 export type ThemePreference = typeof THEME_PREFERENCES[number]
 
