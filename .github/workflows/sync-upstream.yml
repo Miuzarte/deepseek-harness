@@ -1,0 +1,132 @@
+# Rebase this fork's local commits onto upstream and force-push the branch.
+#
+# The job fails loudly on a rebase conflict or a failed gate, so the fork never
+# advertises a tree that was not rebuilt and re-tested. Nothing is pushed until
+# every earlier step succeeded.
+#
+# The commits this workflow rebases must already contain this file: a workflow
+# scheduled on the default branch is read from that branch, and resetting to
+# upstream would delete it otherwise.
+name: sync-upstream
+
+on:
+  schedule:
+    # 18:00 and 06:00 CST (UTC+8). GitHub cron is always UTC.
+    - cron: '0 10 * * *'
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  SYNC_BRANCH: master
+  UPSTREAM_REPO: https://github.com/deepseek-ai/deepseek-harness.git
+  UPSTREAM_REF: master
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      # The default GITHUB_TOKEN is refused for any file under
+      # .github/workflows, and upstream edits those files most weeks. Fail here,
+      # before the gate, rather than at the push that follows it.
+      - name: Require the push token
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::SYNC_TOKEN is required: a PAT with contents and workflows write access to this fork."
+            exit 1
+          fi
+
+      - name: Checkout fork branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SYNC_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name 'dsh-sync-bot'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Rewritten commits are unsigned unless a signing key is imported
+          # below; an inherited signing setting with no key would fail the run.
+          git config commit.gpgSign false
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream --tags --prune
+
+      - name: Detect new upstream commits
+        id: detect
+        run: |
+          target="upstream/$UPSTREAM_REF"
+          if git merge-base --is-ancestor "$target" HEAD; then
+            echo "Already contains $target; nothing to push."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New upstream commits since this fork's last sync:"
+            git --no-pager log --oneline "HEAD..$target" | head -20
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase local commits onto upstream
+        if: steps.detect.outputs.changed == 'true'
+        run: git rebase "upstream/$UPSTREAM_REF"
+
+      - name: Set up Node
+        if: steps.detect.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Enable pnpm
+        if: steps.detect.outputs.changed == 'true'
+        run: corepack enable
+
+      # Gate: the rebased tree must still install, still bundle the two patched
+      # client packages, and still pass their suites. A stale bundle or a
+      # silently reverted hunk fails here instead of reaching the fork.
+      - name: Rebuild patched bundles and run their tests
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          pnpm install --frozen-lockfile
+          # A fresh checkout has no lib/. The host pass generates the
+          # lib/typert.* remote contributions the client tsc resolves and the
+          # lib/types entries the bundles read; skipping it fails first with
+          # missing /remote types, then with UNRESOLVED_ENTRY at bundle time.
+          pnpm run build:lib:host
+          pnpm exec tsc -b packages/client/ui-settings packages/client/ui-theme
+          pnpm --filter @deepseek-ai/dsh-client-ui-settings bundle
+          pnpm --filter @deepseek-ai/dsh-client-ui-theme bundle
+          pnpm exec vitest run packages/client/ui-settings packages/client/ui-theme packages/client/connection
+
+      # origin carries the checkout step's SYNC_TOKEN credential; it is the only
+      # token that may update upstream workflow files.
+      - name: Force-push the rebased branch
+        if: steps.detect.outputs.changed == 'true'
+        run: git push --force-with-lease origin "HEAD:$SYNC_BRANCH"
+
+      # Optional: sign the rewritten commits. Add the GPG_PRIVATE_KEY secret
+      # (an ASCII-armored, passphrase-less signing key registered to the
+      # pushing account), then uncomment this step and the --gpg-sign flag.
+      #
+      # - name: Import signing key
+      #   if: steps.detect.outputs.changed == 'true'
+      #   env:
+      #     GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      #   run: |
+      #     printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+      #     keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+      #     git config user.signingkey "$keyid"
+      #
+      # and change the rebase step to:
+      #   git rebase --gpg-sign "upstream/$UPSTREAM_REF"
