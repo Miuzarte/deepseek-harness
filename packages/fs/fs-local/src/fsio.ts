@@ -6,8 +6,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { chmod, link, lstat, mkdir, open, readFile, realpath, readdir, rename, rm, stat } from 'node:fs/promises'
+import { constants as fsConstants, createReadStream } from 'node:fs'
+import {
+  chmod, copyFile, link, lstat, mkdir, open, readFile, realpath, readdir, rename, rm, stat,
+} from 'node:fs/promises'
 import type { BigIntStats, Dirent, Stats } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { TextDecoder } from 'node:util'
@@ -34,6 +36,16 @@ function isEEXIST(error: unknown): boolean {
  */
 function isENOTDIR(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'ENOTDIR'
+}
+
+/**
+ * Whether the platform refuses to create a directory entry with the link syscall.
+ * Android denies hard links inside an application's data directory, which removes
+ * the no-replace publication primitive this module prefers.
+ */
+function isLinkUnavailable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'EACCES' || code === 'EPERM' || code === 'ENOTSUP' || code === 'ENOSYS'
 }
 
 function isAbortError(error: unknown): boolean {
@@ -617,7 +629,26 @@ export async function writeFileAtomic(
       try {
         await linkFile(tempPath, absolutePath)
       } catch (error: unknown) {
-        await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+        // A platform that refuses hard links inside app data (Android) cannot use
+        // the no-replace link at all, so retry with an exclusive copy: the
+        // create-if-absent guarantee survives, only the atomic directory entry is
+        // lost, and the copied target is synced because link() inherited its
+        // durability from the already-synced staged file while copy() does not
+        if (!isLinkUnavailable(error)) {
+          await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+        } else {
+          try {
+            await copyFile(tempPath, absolutePath, fsConstants.COPYFILE_EXCL)
+          } catch (copyError: unknown) {
+            await throwGuardedCreateFailure(copyError, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget)
+          }
+          const published = await open(absolutePath, 'r+')
+          try {
+            await published.sync()
+          } finally {
+            await published.close()
+          }
+        }
       }
     } else if (platform === 'win32' && mode !== undefined) {
       try {

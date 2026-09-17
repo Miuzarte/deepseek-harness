@@ -763,13 +763,39 @@ describe('writeFileAtomic — temp-file safety', () => {
 
   it('maps a non-collision guarded-create publication failure and cleans staging', async () => {
     const file = join(dir, 'a.txt')
-    const denied = Object.assign(new Error('link denied'), { code: 'EACCES' })
+    const denied = Object.assign(new Error('link failed'), { code: 'EIO' })
 
     await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
       linkFile: async () => { throw denied },
     }, { displayPath: file })).rejects.toMatchObject({ code: 'FS_IO_ERROR', cause: denied })
     await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+  })
+
+  it('publishes by exclusive copy when the platform denies hard links', async () => {
+    const file = join(dir, 'a.txt')
+    const denied = Object.assign(new Error('link denied'), { code: 'EACCES' })
+
+    await writeFileAtomic(file, 'ours', undefined, undefined, {
+      linkFile: async () => { throw denied },
+    }, { displayPath: file })
+
+    expect(await readFile(file, 'utf8')).toBe('ours')
+    expect((await readdir(dir)).filter(name => name.includes('.tmp'))).toEqual([])
+  })
+
+  it('preserves a competitor that wins the exclusive-copy fallback', async () => {
+    const file = join(dir, 'a.txt')
+    await writeFile(file, 'competitor')
+    const denied = Object.assign(new Error('link denied'), { code: 'EACCES' })
+
+    await expect(writeFileAtomic(file, 'ours', undefined, undefined, {
+      linkFile: async () => { throw denied },
+    }, { displayPath: file })).rejects.toMatchObject({
+      code: 'FS_NOT_OBSERVED',
+      message: `cannot overwrite existing "${file}" without reading it first`,
+    })
+    expect(await readFile(file, 'utf8')).toBe('competitor')
   })
 
   it('maps a guarded-create target-inspection failure and cleans staging', async () => {
