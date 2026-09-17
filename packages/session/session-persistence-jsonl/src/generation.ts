@@ -8,7 +8,9 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
+import { constants as fsConstants } from 'node:fs'
 import {
+  copyFile as fsCopyFile,
   link as fsLink,
   lstat as fsLstat,
   open as fsOpen,
@@ -176,6 +178,7 @@ interface GenerationFileSystem {
   stat(path: string): Promise<JsonlPhysicalIdentity>
   lstat(path: string): Promise<{ isFile(): boolean; isSymbolicLink(): boolean }>
   link(existingPath: string, newPath: string): Promise<void>
+  copyFile(existingPath: string, newPath: string, mode: number): Promise<void>
   rm(path: string): Promise<void>
 }
 
@@ -216,6 +219,7 @@ const defaultFileSystem: GenerationFileSystem = {
   stat: path => fsStat(path, { bigint: true }),
   lstat: path => fsLstat(path),
   link: fsLink,
+  copyFile: (existingPath, newPath, mode) => fsCopyFile(existingPath, newPath, mode),
   rm: path => fsRm(path, { force: true }),
 }
 
@@ -229,6 +233,12 @@ const defaultInternals: JsonlGenerationInternals = {
 
 function isEEXIST(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'EEXIST'
+}
+
+/** Whether the platform refuses to create a directory entry with the link syscall. */
+function isLinkUnavailable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'EACCES' || code === 'EPERM' || code === 'ENOTSUP' || code === 'ENOSYS'
 }
 
 /** Whether a filesystem-owned failure should retain its original errno and path. */
@@ -828,9 +838,23 @@ async function publishCurrentExclusive(
   try {
     await internals.fs.link(staged, currentPath)
   } catch (error) {
-    /* v8 ignore else -- a non-collision filesystem error propagates unchanged. */
+    /* v8 ignore next -- a non-collision filesystem error propagates unchanged. */
     if (isEEXIST(error)) return false
-    /* v8 ignore next -- the filesystem error is already complete. */
+    // Android denies hard links inside an application's data directory, so the
+    // exclusive publish falls back to an exclusive copy of the already-synced
+    // staging file, which keeps the create-if-absent guarantee and gives up only
+    // the atomic directory entry, and a torn entry is caught by the verification
+    // that any later reader performs
+    if (isLinkUnavailable(error)) {
+      try {
+        await internals.fs.copyFile(staged, currentPath, fsConstants.COPYFILE_EXCL)
+      } catch (copyError) {
+        if (isEEXIST(copyError)) return false
+        throw copyError
+      }
+      await syncDirectory(dirname(currentPath), internals)
+      return true
+    }
     throw error
   }
   await syncDirectory(dirname(currentPath), internals)

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import {
+  copyFile as copyFileOnDisk,
   link,
   mkdir,
   mkdtemp,
@@ -1615,6 +1616,62 @@ describe('JSONL immutable generation publication', () => {
 
     expect(raced).toBe(true)
     expect(await readFile(request.currentPath, 'utf8')).toBe(line(header(3)) + line(event0))
+  })
+
+  it('publishes by exclusive copy when the platform denies hard links', async () => {
+    const root = await tempRoot()
+    const request = options(root)
+    await writeFile(request.sourcePath, line(header(0)) + line(event0))
+
+    await ensureWithOverrides(
+      request,
+      { platform: 'android', fs: posixSimulationFs({ link: async () => { throw fsError('EACCES') } }) },
+    )
+
+    expect(await readFile(request.currentPath, 'utf8')).toBe(line(header(3)) + line(event0))
+    expect((await readdir(root)).every(name => !name.includes('.tmp'))).toBe(true)
+  })
+
+  it('accepts an identical target that wins the exclusive-copy fallback', async () => {
+    const root = await tempRoot()
+    const request = options(root)
+    await writeFile(request.sourcePath, line(header(0)) + line(event0))
+    let copied = false
+    const copyFile = async (existingPath: string, newPath: string) => {
+      await copyFileOnDisk(existingPath, newPath)
+      copied = true
+      throw fsError('EEXIST')
+    }
+
+    await ensureWithOverrides(
+      request,
+      {
+        platform: 'android',
+        fs: posixSimulationFs({ link: async () => { throw fsError('EACCES') }, copyFile }),
+      },
+    )
+
+    expect(copied).toBe(true)
+    expect(await readFile(request.currentPath, 'utf8')).toBe(line(header(3)) + line(event0))
+  })
+
+  it('propagates a copy failure from the hard-link fallback', async () => {
+    const root = await tempRoot()
+    const request = options(root)
+    const failure = fsError('ENOSPC')
+    await writeFile(request.sourcePath, line(header(0)) + line(event0))
+
+    await expect(ensureWithOverrides(
+      request,
+      {
+        platform: 'android',
+        fs: posixSimulationFs({
+          link: async () => { throw fsError('EACCES') },
+          copyFile: async () => { throw failure },
+        }),
+      },
+    )).rejects.toBe(failure)
+    expect(await readdir(root)).toEqual(['session.jsonl'])
   })
 
   it('honors cancellation before reading a generation', async () => {

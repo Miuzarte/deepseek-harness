@@ -66,6 +66,27 @@ git diff upstream/master..master --stat
 
 rebase 上游时如果上游动了这几个文件要重跑上面那套验证，尤其是那两个 ABI 尺寸断言的位置。
 
+## 5. 会话持久化的独占发布在安卓上退化成独占拷贝
+
+**问题**：`session-persistence-jsonl/src/generation.ts` 的 `publishCurrentExclusive` 用 `fs.link()` 把已 fsync 的临时文件发布成 `session.v<版本>.jsonl.zstd`，靠 `link` 的「目标已存在就 EEXIST」拿到**原子且独占**的目录项。而安卓 10+ 在应用数据目录里**禁止硬链接**，于是每次会话运行都以这条错误结束：
+
+```
+EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<token>.tmp'
+  -> '.../sessions/<session>/session.v3.jsonl.zstd'
+```
+
+实测确认过这不是我们自己的路径问题：`run-as <pkg> sh -c 'cd files && ln a b'` 同样 `Permission denied`（`context=u:r:runas_app:s0`），硬链接在 app data 里就是被平台挡掉的。
+
+**做法**：`GenerationFileSystem` 加一个 `copyFile(existing, next, mode)`，`publishCurrentExclusive` 在 `link` 抛 `EACCES` / `EPERM` / `ENOTSUP` / `ENOSYS` 时改用 `fs.copyFile(staged, currentPath, COPYFILE_EXCL)` 发布，拿到 `EEXIST` 仍然走原来那条「已有赢家」的验证路径，其它 errno 原样抛出。
+
+判据是**错误码而不是平台**：link 能用的平台上行为一个字节都不变，只有拒绝 link 的沙盒才降级，所以这段也能在 Linux / macOS 上用注入的假 `link` 完整测到。
+
+代价要写清楚：独占性还在（`O_CREAT|O_EXCL`），但目录项不再原子 —— 崩在拷贝中间会留下半截 `current`，而任何后续读取都要先过 `verifyCurrentFile`，所以结果是 fail-closed 而不是静默损坏。
+
+**新增测试** 3 条（`tests/generation.spec.ts`）：拒绝 link 时靠拷贝发布成功、拷贝拿到 `EEXIST` 时接受已有的同一份目标、拷贝失败的 errno 原样抛出。
+
+验证：`vitest run packages/session/session-persistence-jsonl` 463 通过（13 个文件），`generation.ts` 行/分支/函数覆盖仍 100%，`tsc -b tsconfig.host.json` 0 错。
+
 ## 服务器 / 新机器上同步
 
 ```sh
