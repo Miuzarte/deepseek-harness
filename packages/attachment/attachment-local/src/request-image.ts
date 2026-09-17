@@ -2,8 +2,9 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
-import sharp, { type Sharp } from 'sharp'
+import type { Sharp } from 'sharp'
 import { AttachmentError, ImageVariantId, requestImageDimensions } from '@deepseek-ai/dsh-attachment'
 import type {
   ImageMediaType,
@@ -20,6 +21,22 @@ import {
   isExhaustedEncoding,
 } from './encoding.ts'
 import { detectImage, encodedAlphaIsCompatible, probeImage } from './image.ts'
+
+/** Sharp's static type, erased at runtime. */
+type SharpFactory = typeof import('sharp')['default']
+
+let cachedSharp: SharpFactory | undefined
+
+/**
+ * Load sharp's native libvips binding on first use
+ * Importing this module must not need sharp, because platforms without a
+ * prebuilt binary have to be able to load it and then never call into it
+ * @returns the cached sharp factory.
+ */
+function loadSharp(): SharpFactory {
+  cachedSharp ??= createRequire(import.meta.url)('sharp') as SharpFactory
+  return cachedSharp
+}
 
 /** Transform version included in every cache and upload-index identity. */
 export const REQUEST_IMAGE_TRANSFORM_VERSION = 'request-image-v5'
@@ -86,7 +103,7 @@ function pipeline(attachment: StoredImageAttachment, width: number, height: numb
 }
 
 function sourcePipeline(attachment: StoredImageAttachment): Sharp {
-  return sharp(attachment.data, { failOn: 'error', limitInputPixels: false }).toColourspace('srgb')
+  return loadSharp()(attachment.data, { failOn: 'error', limitInputPixels: false }).toColourspace('srgb')
 }
 
 async function createRequestImage(

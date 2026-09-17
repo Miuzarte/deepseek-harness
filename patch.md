@@ -37,6 +37,35 @@ git diff upstream/master..master --stat
 
 **上游新增的 workflow 文件会跟着 sync 落到 fork 并以 enabled 状态出现**：disable 是仓库状态、绑定 workflow ID，上游新加文件就是新 ID，得再禁一次。同步后检查一遍：`gh workflow list --all -R Miuzarte/deepseek-harness`，除 `sync-upstream` 外都应是 `disabled_manually`；有漏的就 `gh workflow disable <name> -R Miuzarte/deepseek-harness`。
 
+## 4. 原生依赖惰性化（给没有预编译产物的平台）
+
+**问题**：Android 上没有 `koffi` / `node-pty` / `sharp` / `@deepseek-ai/node-addon-system` 的预编译产物，而引用它们的地方是**模块顶层**的 `import` —— 所以「这个功能先不启用」救不了：只要 profile 树里有那条 row，import 就会执行，整棵 profile 跟着一起挂（实测 152 条 entry 里挂掉的正是 `subprocess` 和 `sandbox` 两条）。
+
+`packages/attachment/attachment-local` 的 `image.ts` / `normalization.ts` / `request-image.ts` 顶层 import `sharp`，`packages/subprocess/subprocess-local/src/index.ts` 顶层 import `node-pty`，`packages/sandbox/sandbox-windows-acl/src/ffi.ts` 与 `packages/subprocess/win32-process/src/ffi.ts` 顶层 import `koffi`。运行期替身包救不了 `subprocess` / `sandbox`：`win32-process` 在**模块顶层**断言 struct 尺寸（`STARTUPINFOW layout mismatch: koffi computed 0, expected 104`），假 koffi 一读属性就露馅。
+
+顺带一条平台限制，给安卓编原生依赖也躲不开：**`.node` 放在 app data 目录里大概率 dlopen 不了**（linker namespace 只认系统库和 APK 自己的 `nativeLibraryDir`），所以惰性化 + 降级才是正解。
+
+**做法**：原生 import 换成**首次使用时才 require** 的访问器，用 `createRequire(import.meta.url)` 而不是 `await import()` —— 有两处调用方是同步的（`node-pty` 的 spawn 靠同步抛错，sharp 的图像流水线是同步函数），`await import` 会把错误抛到调用方的 `try/catch` 之外。
+
+| 文件 | 改法 |
+| :-- | :-- |
+| `win32-process/src/ffi.ts` | `import koffi` → 包内唯一的惰性访问器 `koffi()`，两个 struct 与两条 ABI 尺寸断言改成首次使用时构建（导出从常量 `STARTUPINFOW` / `PROCESS_INFORMATION` 改成 `startupInfoStruct()` / `processInfoStruct()`） |
+| `win32-process/src/process.ts` | 复用 `./ffi.ts` 的 `koffi()`，3 处 `koffi.free` 跟着改 |
+| `subprocess-local/src/windows-inspector.ts` | 同上，惰性 `pvoid()` |
+| `subprocess-local/src/linux-execve.ts` | 惰性 `koffi()` |
+| `subprocess-local/src/index.ts` | `node-pty` → 惰性 `nodePty()`，`IPty` 走 `import type` 保持类型 |
+| `sandbox-windows-acl/src/ffi.ts` | 惰性 `koffi()` + `pvoid()` / `ppvoid()` |
+| `attachment-local/src/image.ts` `normalization.ts` `request-image.ts` | 惰性 `loadSharp()` |
+| `session-persistence-jsonl/src/lease.ts` | `ERR_FLOCK_UNSUPPORTED_PLATFORM` 视作获取成功（单进程假设，与模块注释里给浏览器 worker 的 stub 同理由），争用与其它错误照旧 |
+
+**对其它平台无行为变化**：惰性访问器缓存首次结果，ABI 断言从模块顶层挪到首次使用、但仍排在任何真实调用之前。`win32-process/src/ffi.ts` 的 default export 回退臂加了 `/* v8 ignore next */` —— 那条路取决于 koffi 的 CJS 桥长什么样、与输入无关，不加会挂掉仓库的 per-file 100% 分支覆盖门。
+
+验证（在开发克隆里跑过）：`tsc -b tsconfig.host.json` 0 错，`build:lib:host` 成功，**产物里 eager 的 `koffi` / `node-pty` / `sharp` 共 0 处**，`vitest run packages/subprocess packages/sandbox packages/attachment packages/session` 2368 个测试通过，web profile 回归能起。
+
+**和本 fork 的部署无关的部分**：fork 自己的服务器上 host 侧是**源码启动**（tsx 直接读 `src/`），这些改动不用重新构建；但把 host 侧打成构建产物分发时（例如 `scripts/release/pack.ts` 出的 tarball），改完必须重新构建。**pack 之前要先删 `packages/*/*/lib` / `apps/*/lib` / `vendor/*/lib` / `native/system/packages/*/lib`**：tsdown 是 `clean: false`，改完源码后带 eager `import koffi` 的陈旧 chunk 会留在 `lib/` 里，而各包 `files` 正好 glob `lib/runner-*.js` / `lib/types-*.js`，会被一起打进 tarball。
+
+rebase 上游时如果上游动了这几个文件要重跑上面那套验证，尤其是那两个 ABI 尺寸断言的位置。
+
 ## 服务器 / 新机器上同步
 
 ```sh

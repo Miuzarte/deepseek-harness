@@ -10,10 +10,10 @@
 
 import { constants } from 'node:fs'
 import { access, stat } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { delimiter, extname, isAbsolute, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import * as nodePty from 'node-pty'
-import type { IPtyForkOptions } from 'node-pty'
+import type { IPty, IPtyForkOptions } from 'node-pty'
 import { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type {
   SubprocessHandle,
@@ -40,6 +40,22 @@ import { targetEnvironment } from './runner-launch.ts'
 import { createProcessInspector } from './process-inspector.ts'
 import type { ProcessInspector } from './process-inspector.ts'
 import { LocalTerminalHandle } from './terminal.ts'
+
+/** node-pty's static type, erased at runtime. */
+type NodePty = typeof import('node-pty')
+
+let cachedNodePty: NodePty | undefined
+
+/**
+ * Load node-pty's native prebuild on first use
+ * Importing this module must not need node-pty, because platforms without a
+ * prebuilt binary have to be able to load it and then never call into it
+ * @returns the cached node-pty module.
+ */
+function nodePty(): NodePty {
+  cachedNodePty ??= createRequire(import.meta.url)('node-pty') as NodePty
+  return cachedNodePty
+}
 
 /**
  * Local subprocess service: platform-selected managed ranges, Node-shaped stdio
@@ -255,9 +271,9 @@ export class LocalSubprocessRuntime extends SubprocessRuntime {
       options.cwd = scope.cwd
       options.env = scope.env
     }
-    let terminal: nodePty.IPty
+    let terminal: IPty
     try {
-      terminal = nodePty.spawn(
+      terminal = nodePty().spawn(
         scope?.command ?? file,
         scope?.args ?? [...spec.argv.slice(1)],
         options,

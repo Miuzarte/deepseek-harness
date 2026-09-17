@@ -41,6 +41,8 @@ const refuse = vi.hoisted(() => ({
   flock: false,
   /** Next flock call fails EWOULDBLOCK. */
   flockBusy: false,
+  /** Every flock call fails with the platform-unsupported code (no flock binding). */
+  flockUnsupported: false,
   /** Next stat of a lock file fails EACCES (unreadable path). */
   lockStat: false,
   /** For N further lock-path stats: unlink and recreate the file first, so the locked inode is orphaned. */
@@ -88,6 +90,12 @@ vi.mock('@deepseek-ai/node-addon-system/flock', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@deepseek-ai/node-addon-system/flock')>()
   return {
     tryLockExclusive: async (fd: number): Promise<void> => {
+      if (refuse.flockUnsupported) {
+        throw Object.assign(new Error('flock is not supported on android-arm64'), {
+          code: 'ERR_FLOCK_UNSUPPORTED_PLATFORM',
+          syscall: 'flock',
+        })
+      }
       if (refuse.flock) {
         refuse.flock = false
         throw Object.assign(new Error('EACCES: injected flock refusal'), { code: 'EACCES' })
@@ -108,6 +116,7 @@ afterEach(async () => {
   refuse.lockOpen = false
   refuse.flock = false
   refuse.flockBusy = false
+  refuse.flockUnsupported = false
   refuse.lockStat = false
   refuse.swapLockOnStat = 0
   refuse.dropLockOnStat = false
@@ -294,6 +303,37 @@ describe('cross-process write lock', () => {
     // Some libcs spell flock(2) contention EWOULDBLOCK rather than EAGAIN.
     refuse.flockBusy = true
     await expect(backend.open(SessionId('win-contended'), 'write')).rejects.toBeInstanceOf(SessionAlreadyOwnedError)
+  })
+
+  it.skipIf(process.platform === 'win32')('writes a session when the platform has no flock binding', async () => {
+    const root = await freshRoot()
+    // Android ships no flock addon: acquisition must succeed for this
+    // single-process host instead of failing the write open
+    refuse.flockUnsupported = true
+    const backend = await mount(root)
+    const writer = await backend.create(meta('no-flock'))
+    await writer.append([...EVENTS])
+    await writer.close()
+    const reader = await backend.open(SessionId('no-flock'), 'read')
+    expect((await reader.read()).events.map(event => event.seq)).toEqual([0, 1])
+    await reader.close()
+  })
+
+  it('admits acquisition when the platform has no flock binding', async () => {
+    const root = await freshRoot()
+    const dir = join(root, 'no-flock')
+    // The POSIX lane is unreachable on a Windows host, so pin it: a platform
+    // without the flock addon (Android) must admit the writer rather than
+    // propagate the unsupported-platform failure
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    refuse.flockUnsupported = true
+    try {
+      const lease = await SessionWriteLease.acquire(dir, SessionId('no-flock'))
+      await lease.release()
+    } finally {
+      platform.mockRestore()
+    }
+    expect(existsSync(join(dir, LOCK))).toBe(true)
   })
 
   it.skipIf(process.platform === 'win32')('surfaces a lock-path stat refusal from the inode verification', async () => {

@@ -1,6 +1,6 @@
 /** ACL/token bindings layered on the shared Win32 process owner. */
 
-import koffi from 'koffi'
+import { createRequire } from 'node:module'
 import {
   ERROR_INSUFFICIENT_BUFFER,
   Win32Error,
@@ -22,9 +22,46 @@ export {
 } from '@deepseek-ai/dsh-win32-process'
 export type { NativePtr } from '@deepseek-ai/dsh-win32-process'
 
-type Ptr = ReturnType<typeof koffi.pointer>
-const PVOID: Ptr = koffi.pointer('void')
-const PPVOID: Ptr = koffi.pointer(PVOID)
+/** Koffi's static type, erased at runtime. */
+type Koffi = typeof import('koffi')['default']
+
+type Ptr = ReturnType<Koffi['pointer']>
+
+let cachedKoffi: Koffi | undefined
+
+/**
+ * Load the native FFI binding on first use
+ * Importing this module must not need koffi, because platforms without a prebuilt
+ * binary have to be able to load it and then never call into it
+ * @returns the cached koffi module.
+ */
+function koffi(): Koffi {
+  if (cachedKoffi === undefined) {
+    const loaded = createRequire(import.meta.url)('koffi') as Koffi & { default?: Koffi }
+    // A CJS bridge can hand back the module namespace instead of the object its
+    // named exports hang off, so fall back to that namespace's default export
+    // The fallback arm depends on the shape of koffi's CJS bridge rather than on any input,
+    // and that bridge always hands back an object whose default export carries `pointer`
+    /* v8 ignore next -- no input reaches the fallback arm */
+    cachedKoffi = (typeof loaded.default?.pointer === 'function' ? loaded.default : loaded) as Koffi
+  }
+  return cachedKoffi
+}
+
+let cachedPvoid: Ptr | undefined
+let cachedPpvoid: Ptr | undefined
+
+/** Koffi `void *`, built on first use so importing this module stays native-free. */
+function pvoid(): Ptr {
+  cachedPvoid ??= koffi().pointer('void')
+  return cachedPvoid
+}
+
+/** Koffi `void **`, derived from {@link pvoid}. */
+function ppvoid(): Ptr {
+  cachedPpvoid ??= koffi().pointer(pvoid())
+  return cachedPpvoid
+}
 
 /** ACL/token calls composed with the generic Win32 process binding table. */
 export interface Win32Bindings extends Win32ProcessBindings {
@@ -115,7 +152,7 @@ export function isInvalidHandle(handle: NativePtr | null | undefined): boolean {
  * @param value - unsigned value to store.
  */
 export function encodeUint32(slot: NativePtr, value: number): void {
-  koffi.encode(slot, 'uint32', value)
+  koffi().encode(slot, 'uint32', value)
 }
 
 /**
@@ -124,7 +161,7 @@ export function encodeUint32(slot: NativePtr, value: number): void {
  * @returns pointer address.
  */
 export function ptrAddress(ptr: NativePtr): bigint {
-  return koffi.address(ptr)
+  return koffi().address(ptr)
 }
 
 /**
@@ -133,7 +170,7 @@ export function ptrAddress(ptr: NativePtr): bigint {
  * @returns allocated pointer.
  */
 export function allocBytes(length: number): NativePtr {
-  return koffi.alloc('uint8', length) as NativePtr
+  return koffi().alloc('uint8', length) as NativePtr
 }
 
 /**
@@ -153,7 +190,7 @@ export function allocOverlapped(): NativePtr {
  * @returns decoded pointer, or null for address zero.
  */
 export function decodePtrAt(buffer: Buffer, offset: number): NativePtr | null {
-  const value = koffi.decode(buffer, offset, PVOID) as NativePtr | null
+  const value = koffi().decode(buffer, offset, pvoid()) as NativePtr | null
   return isNullPtr(value) ? null : value
 }
 
@@ -164,7 +201,7 @@ export function decodePtrAt(buffer: Buffer, offset: number): NativePtr | null {
  * @returns decoded value.
  */
 export function decodeUint8At(ptr: NativePtr, offset: number): number {
-  return koffi.decode(ptr, offset, 'uint8') as number
+  return koffi().decode(ptr, offset, 'uint8') as number
 }
 
 /**
@@ -174,7 +211,7 @@ export function decodeUint8At(ptr: NativePtr, offset: number): number {
  * @returns decoded value.
  */
 export function decodeUint16At(ptr: NativePtr, offset: number): number {
-  return koffi.decode(ptr, offset, 'uint16') as number
+  return koffi().decode(ptr, offset, 'uint16') as number
 }
 
 /**
@@ -184,7 +221,7 @@ export function decodeUint16At(ptr: NativePtr, offset: number): number {
  * @returns decoded value.
  */
 export function decodeUint32At(ptr: NativePtr, offset: number): number {
-  return koffi.decode(ptr, offset, 'uint32') as number
+  return koffi().decode(ptr, offset, 'uint32') as number
 }
 
 /**
@@ -222,42 +259,42 @@ let cached: Win32Bindings | undefined
 function bindings(): Win32Bindings {
   if (cached !== undefined) return cached
   cached = extendWin32ProcessBindings(({ kernel32, advapi32, bind }) => ({
-    openProcess: bind(kernel32, 'OpenProcess', PVOID, ['uint32', 'int', 'uint32']),
-    openProcessToken: bind(advapi32, 'OpenProcessToken', 'int', [PVOID, 'uint32', PPVOID]),
-    localAlloc: bind(kernel32, 'LocalAlloc', PVOID, ['uint32', 'size_t']),
-    localFree: bind(kernel32, 'LocalFree', PVOID, [PVOID]),
-    convertStringSidToSidW: bind(advapi32, 'ConvertStringSidToSidW', 'int', ['str16', PPVOID]),
+    openProcess: bind(kernel32, 'OpenProcess', pvoid(), ['uint32', 'int', 'uint32']),
+    openProcessToken: bind(advapi32, 'OpenProcessToken', 'int', [pvoid(), 'uint32', ppvoid()]),
+    localAlloc: bind(kernel32, 'LocalAlloc', pvoid(), ['uint32', 'size_t']),
+    localFree: bind(kernel32, 'LocalFree', pvoid(), [pvoid()]),
+    convertStringSidToSidW: bind(advapi32, 'ConvertStringSidToSidW', 'int', ['str16', ppvoid()]),
     createWellKnownSid: bind(advapi32, 'CreateWellKnownSid', 'int', [
-      'int', PVOID, PVOID, koffi.pointer('uint32'),
+      'int', pvoid(), pvoid(), koffi().pointer('uint32'),
     ]),
-    isValidSid: bind(advapi32, 'IsValidSid', 'int', [PVOID]),
-    getLengthSid: bind(advapi32, 'GetLengthSid', 'uint32', [PVOID]),
-    copySid: bind(advapi32, 'CopySid', 'int', ['uint32', PVOID, PVOID]),
+    isValidSid: bind(advapi32, 'IsValidSid', 'int', [pvoid()]),
+    getLengthSid: bind(advapi32, 'GetLengthSid', 'uint32', [pvoid()]),
+    copySid: bind(advapi32, 'CopySid', 'int', ['uint32', pvoid(), pvoid()]),
     getTokenInformation: bind(advapi32, 'GetTokenInformation', 'int', [
-      PVOID, 'int', PVOID, 'uint32', koffi.pointer('uint32'),
+      pvoid(), 'int', pvoid(), 'uint32', koffi().pointer('uint32'),
     ]),
-    setTokenInformation: bind(advapi32, 'SetTokenInformation', 'int', [PVOID, 'int', PVOID, 'uint32']),
+    setTokenInformation: bind(advapi32, 'SetTokenInformation', 'int', [pvoid(), 'int', pvoid(), 'uint32']),
     createRestrictedToken: bind(advapi32, 'CreateRestrictedToken', 'int', [
-      PVOID, 'uint32', 'uint32', PVOID, 'uint32', PVOID, 'uint32', PVOID, PPVOID,
+      pvoid(), 'uint32', 'uint32', pvoid(), 'uint32', pvoid(), 'uint32', pvoid(), ppvoid(),
     ]),
-    setEntriesInAclW: bind(advapi32, 'SetEntriesInAclW', 'uint32', ['uint32', PVOID, PVOID, PPVOID]),
+    setEntriesInAclW: bind(advapi32, 'SetEntriesInAclW', 'uint32', ['uint32', pvoid(), pvoid(), ppvoid()]),
     setNamedSecurityInfoW: bind(advapi32, 'SetNamedSecurityInfoW', 'uint32', [
-      'str16', 'int', 'uint32', PVOID, PVOID, PVOID, PVOID,
+      'str16', 'int', 'uint32', pvoid(), pvoid(), pvoid(), pvoid(),
     ]),
     getNamedSecurityInfoW: bind(advapi32, 'GetNamedSecurityInfoW', 'uint32', [
-      'str16', 'int', 'uint32', PPVOID, PPVOID, PPVOID, PPVOID, PPVOID,
+      'str16', 'int', 'uint32', ppvoid(), ppvoid(), ppvoid(), ppvoid(), ppvoid(),
     ]),
-    getTempPathW: bind(kernel32, 'GetTempPathW', 'uint32', ['uint32', PVOID]),
+    getTempPathW: bind(kernel32, 'GetTempPathW', 'uint32', ['uint32', pvoid()]),
     setEnvironmentVariableW: bind(kernel32, 'SetEnvironmentVariableW', 'int', ['str16', 'str16']),
-    setConsoleCtrlHandler: bind(kernel32, 'SetConsoleCtrlHandler', 'int', [PVOID, 'int']),
-    createFileW: bind(kernel32, 'CreateFileW', PVOID, [
-      'str16', 'uint32', 'uint32', PVOID, 'uint32', 'uint32', PVOID,
+    setConsoleCtrlHandler: bind(kernel32, 'SetConsoleCtrlHandler', 'int', [pvoid(), 'int']),
+    createFileW: bind(kernel32, 'CreateFileW', pvoid(), [
+      'str16', 'uint32', 'uint32', pvoid(), 'uint32', 'uint32', pvoid(),
     ]),
     lockFileEx: bind(kernel32, 'LockFileEx', 'int', [
-      PVOID, 'uint32', 'uint32', 'uint32', 'uint32', PVOID,
+      pvoid(), 'uint32', 'uint32', 'uint32', 'uint32', pvoid(),
     ]),
     unlockFileEx: bind(kernel32, 'UnlockFileEx', 'int', [
-      PVOID, 'uint32', 'uint32', 'uint32', PVOID,
+      pvoid(), 'uint32', 'uint32', 'uint32', pvoid(),
     ]),
   })) as unknown as Win32Bindings
   return cached

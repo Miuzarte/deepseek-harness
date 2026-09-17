@@ -51,6 +51,11 @@ function isLockContention(error: unknown): boolean {
   return code === 'EAGAIN' || code === 'EWOULDBLOCK'
 }
 
+/** Whether a flock failure means this platform has no flock binding at all. */
+function isUnsupportedPlatform(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ERR_FLOCK_UNSUPPORTED_PLATFORM'
+}
+
 /**
  * One held write lock. Constructed only by {@link SessionWriteLease.acquire};
  * `release` closes the descriptor or handle, which is what releases the lock.
@@ -94,7 +99,12 @@ export class SessionWriteLease {
           await tryLockExclusive(handle.fd)
         } catch (error: unknown) {
           if (isLockContention(error)) throw new SessionAlreadyOwnedError(id)
-          throw error
+          if (!isUnsupportedPlatform(error)) throw error
+          // No flock binding exists on this platform (Android), so no other
+          // process can be excluded, and this one is the only writer: the
+          // in-process write claim already excludes every writer, exactly like
+          // the browser worker's stubbed flock entry
+          return new SessionWriteLease({ kind: 'posix', handle })
         }
         const held = await handle.stat({ bigint: true })
         const current = await stat(path, { bigint: true }).catch((error: unknown) => {

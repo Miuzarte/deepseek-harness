@@ -1,7 +1,23 @@
 /** Lazy libc execve and descriptor bindings used by the one-shot Linux bootstrap. */
 
+import { createRequire } from 'node:module'
 import { getSystemErrorMessage, getSystemErrorName } from 'node:util'
-import koffi from 'koffi'
+
+/** Koffi's static type, erased at runtime. */
+type Koffi = typeof import('koffi')['default']
+
+let cachedKoffi: Koffi | undefined
+
+/**
+ * Load the native FFI binding on first use
+ * Importing this module must not need koffi, because platforms without a prebuilt
+ * binary have to be able to load it and then never call into it
+ * @returns the cached koffi module.
+ */
+function koffi(): Koffi {
+  cachedKoffi ??= createRequire(import.meta.url)('koffi') as Koffi
+  return cachedKoffi
+}
 
 /** Replace the current process image while preserving the supplied argv and environment. */
 export type LinuxExecve = (
@@ -44,7 +60,7 @@ function systemError(errno: number, syscall: string, path?: string): Error {
  */
 export function loadLinuxExecve(): LinuxExecve {
   if (cachedExecve !== undefined) return cachedExecve
-  const libc = koffi.load(null)
+  const libc = koffi().load(null)
   const nativeExecve = libc.func(
     'int execve(const char *pathname, const char **argv, const char **envp)',
   ) as NativeExecve
@@ -54,10 +70,10 @@ export function loadLinuxExecve(): LinuxExecve {
   cachedExecve = (file, argv, env) => {
     for (const fd of STANDARD_FILE_DESCRIPTORS) {
       const flags = nativeFcntl(fd, F_GETFD, 0)
-      if (flags === -1) throw systemError(koffi.errno(), 'fcntl')
+      if (flags === -1) throw systemError(koffi().errno(), 'fcntl')
       if ((flags & FD_CLOEXEC) === 0) continue
       if (nativeFcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) === -1) {
-        throw systemError(koffi.errno(), 'fcntl')
+        throw systemError(koffi().errno(), 'fcntl')
       }
     }
     nativeExecve(
@@ -65,7 +81,7 @@ export function loadLinuxExecve(): LinuxExecve {
       [...argv, null],
       [...Object.entries(env).map(([key, value]) => `${key}=${value}`), null],
     )
-    throw systemError(koffi.errno(), 'execve', file)
+    throw systemError(koffi().errno(), 'execve', file)
   }
   return cachedExecve
 }

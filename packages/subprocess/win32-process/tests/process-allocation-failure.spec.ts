@@ -7,7 +7,7 @@ import {
   waitForProcessExit,
 } from '../src/index.ts'
 import * as ffi from '../src/ffi.ts'
-import { PROCESS_INFORMATION } from '../src/ffi.ts'
+import { processInfoStruct } from '../src/ffi.ts'
 import type { NativePtr, Win32ProcessBindings } from '../src/ffi.ts'
 
 vi.mock('../src/ffi.ts', { spy: true })
@@ -47,7 +47,7 @@ describe('spawnInheritedJobProcess allocation cleanup', () => {
       getStdHandle: vi.fn((selector: number) => BigInt(100 - selector)),
       setHandleInformation: vi.fn(() => 1),
       createProcessAsUserW: vi.fn((_token, _app, _line, _pa, _ta, _inherit, _flags, _env, _cwd, _startup, info) => {
-        koffi.encode(info, PROCESS_INFORMATION, {
+        koffi.encode(info, processInfoStruct(), {
           hProcess: 60n,
           hThread: 61n,
           dwProcessId: 1234,
@@ -83,7 +83,7 @@ describe('shared process allocation cleanup', () => {
       }),
       setHandleInformation: vi.fn(() => 1),
       createProcessAsUserW: vi.fn((_token, _app, _line, _pa, _ta, _inherit, _flags, _env, _cwd, _startup, info) => {
-        koffi.encode(info, PROCESS_INFORMATION, {
+        koffi.encode(info, processInfoStruct(), {
           hProcess: 60n,
           hThread: 61n,
           dwProcessId: 1234,
@@ -122,10 +122,12 @@ describe('shared process allocation cleanup', () => {
       getLastError: vi.fn(() => 109),
       closeHandle: vi.fn(() => 1),
     } as unknown as Win32ProcessBindings
-    const alloc = vi.spyOn(koffi, 'alloc')
     const free = vi.spyOn(koffi, 'free')
     await expect(drainPipe(api, 70n as NativePtr)).resolves.toEqual(Buffer.from('a'))
-    expect(alloc).toHaveBeenCalledOnce()
+    // Assert the slot allocation through the mocked owner module, not through
+    // koffi itself: the lazy loader resolves koffi with createRequire, so the
+    // module object these specs import is not the one the loader reaches
+    expect(vi.mocked(ffi.allocUint32)).toHaveBeenCalledOnce()
     expect(free).toHaveBeenCalledOnce()
   })
 

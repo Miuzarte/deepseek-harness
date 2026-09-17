@@ -1,11 +1,28 @@
 /** Deterministic provider-independent image normalization. */
 
-import sharp, { type Sharp } from 'sharp'
+import { createRequire } from 'node:module'
+import type { Sharp } from 'sharp'
 import { AttachmentError, requestImageDimensions } from '@deepseek-ai/dsh-attachment'
 import type { ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { encodeFirstWithinLimit, encodingLadder, isExhaustedEncoding } from './encoding.ts'
 import { detectImage, encodedAlphaIsCompatible } from './image.ts'
 import type { DetectedImage } from './image.ts'
+
+/** Sharp's static type, erased at runtime. */
+type SharpFactory = typeof import('sharp')['default']
+
+let cachedSharp: SharpFactory | undefined
+
+/**
+ * Load sharp's native libvips binding on first use
+ * Importing this module must not need sharp, because platforms without a
+ * prebuilt binary have to be able to load it and then never call into it
+ * @returns the cached sharp factory.
+ */
+function loadSharp(): SharpFactory {
+  cachedSharp ??= createRequire(import.meta.url)('sharp') as SharpFactory
+  return cachedSharp
+}
 
 /** Deployment-resolved policy for the persisted normalized attachment. */
 export interface NormalizationPolicy {
@@ -71,7 +88,7 @@ async function verifyNormalizedImage(
 
 /** Build one fixed-size, oriented, metadata-free sRGB pipeline from submitted bytes. */
 function preparedPipeline(data: Uint8Array, width: number, height: number): Sharp {
-  return sharp(data, { failOn: 'error', limitInputPixels: false })
+  return loadSharp()(data, { failOn: 'error', limitInputPixels: false })
     .rotate()
     .toColourspace('srgb')
     .resize({ width, height, fit: 'inside', withoutEnlargement: true })

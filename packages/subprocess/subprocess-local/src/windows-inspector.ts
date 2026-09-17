@@ -10,9 +10,33 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import koffi from 'koffi'
+import { createRequire } from 'node:module'
 import type { SubprocessTerminalSignal } from '@deepseek-ai/dsh-subprocess'
 import type { ProcessIdentity, ProcessInspector, ProcessSnapshot } from './process-inspector.ts'
+
+/** Koffi's static type, erased at runtime. */
+type Koffi = typeof import('koffi')['default']
+
+let cachedKoffi: Koffi | undefined
+
+/**
+ * Load the native FFI binding on first use
+ * Importing this module must not need koffi, because platforms without a prebuilt
+ * binary have to be able to load it and then never call into it
+ * @returns the cached koffi module.
+ */
+function koffi(): Koffi {
+  if (cachedKoffi === undefined) {
+    const loaded = createRequire(import.meta.url)('koffi') as Koffi & { default?: Koffi }
+    // A CJS bridge can hand back the module namespace instead of the object its
+    // named exports hang off, so fall back to that namespace's default export
+    // The fallback arm depends on the shape of koffi's CJS bridge rather than on any input,
+    // and that bridge always hands back an object whose default export carries `pointer`
+    /* v8 ignore next -- no input reaches the fallback arm */
+    cachedKoffi = (typeof loaded.default?.pointer === 'function' ? loaded.default : loaded) as Koffi
+  }
+  return cachedKoffi
+}
 
 /** One Toolhelp32 process-table row. */
 export interface ProcessEntry {
@@ -183,7 +207,13 @@ interface Win32Bindings {
   closeHandle(handle: NativePtr): number
 }
 
-const PVOID: ReturnType<typeof koffi.pointer> = koffi.pointer('void')
+let cachedPvoid: ReturnType<Koffi['pointer']> | undefined
+
+/** Koffi `void *`, built on first use so importing this module stays native-free. */
+function pvoid(): ReturnType<Koffi['pointer']> {
+  cachedPvoid ??= koffi().pointer('void')
+  return cachedPvoid
+}
 
 /**
  * Resolve the koffi Win32 struct types once. Registration is lazy and cached
@@ -191,23 +221,24 @@ const PVOID: ReturnType<typeof koffi.pointer> = koffi.pointer('void')
  * re-evaluate this module (a hoisted `vi.mock` re-imports the graph) must not
  * re-register the names.
  */
-function win32Structs(): { PROCESSENTRY32W: ReturnType<typeof koffi.struct>; FILETIME: ReturnType<typeof koffi.struct> } {
+function win32Structs(): { PROCESSENTRY32W: ReturnType<Koffi['struct']>; FILETIME: ReturnType<Koffi['struct']> } {
   if (cachedStructs !== undefined) return cachedStructs
+  const ffi = koffi()
   // koffi PROCESSENTRY32W layout (tlhelp32.h); the size assert pins the x64 layout.
-  const PROCESSENTRY32W = koffi.struct('PROCESSENTRY32W', {
+  const PROCESSENTRY32W = ffi.struct('PROCESSENTRY32W', {
     dwSize: 'uint32',
     cntUsage: 'uint32',
     th32ProcessID: 'uint32',
-    th32DefaultHeapID: PVOID,
+    th32DefaultHeapID: pvoid(),
     th32ModuleID: 'uint32',
     cCntThreads: 'uint32',
     th32ParentProcessID: 'uint32',
     pcPriClassBase: 'int32',
     dwFlags: 'uint32',
-    szExeFile: koffi.array('char16', 260),
+    szExeFile: ffi.array('char16', 260),
   })
   // koffi FILETIME layout (minwinbase.h): two 32-bit halves of the 64-bit timestamp.
-  const FILETIME = koffi.struct('FILETIME', {
+  const FILETIME = ffi.struct('FILETIME', {
     dwLowDateTime: 'uint32',
     dwHighDateTime: 'uint32',
   })
@@ -236,27 +267,28 @@ let cachedBindings: Win32Bindings | undefined
  */
 function win32Bindings(): Win32Bindings {
   if (cachedBindings !== undefined) return cachedBindings
+  const ffi = koffi()
   const { PROCESSENTRY32W, FILETIME } = win32Structs()
-  const kernel32 = koffi.load('kernel32.dll')
+  const kernel32 = ffi.load('kernel32.dll')
   const bind = (
     name: string,
-    result: ReturnType<typeof koffi.pointer> | string,
-    args: Array<ReturnType<typeof koffi.pointer> | string>,
+    result: ReturnType<Koffi['pointer']> | string,
+    args: Array<ReturnType<Koffi['pointer']> | string>,
   ): unknown => kernel32.func('__stdcall', name, result, args)
   cachedBindings = {
-    createToolhelp32Snapshot: bind('CreateToolhelp32Snapshot', PVOID, ['uint32', 'uint32']),
-    process32FirstW: bind('Process32FirstW', 'int', [PVOID, koffi.pointer(PROCESSENTRY32W)]),
-    process32NextW: bind('Process32NextW', 'int', [PVOID, koffi.pointer(PROCESSENTRY32W)]),
-    openProcess: bind('OpenProcess', PVOID, ['uint32', 'int', 'uint32']),
+    createToolhelp32Snapshot: bind('CreateToolhelp32Snapshot', pvoid(), ['uint32', 'uint32']),
+    process32FirstW: bind('Process32FirstW', 'int', [pvoid(), ffi.pointer(PROCESSENTRY32W)]),
+    process32NextW: bind('Process32NextW', 'int', [pvoid(), ffi.pointer(PROCESSENTRY32W)]),
+    openProcess: bind('OpenProcess', pvoid(), ['uint32', 'int', 'uint32']),
     getProcessTimes: bind('GetProcessTimes', 'int', [
-      PVOID,
-      koffi.pointer(FILETIME),
-      koffi.pointer(FILETIME),
-      koffi.pointer(FILETIME),
-      koffi.pointer(FILETIME),
+      pvoid(),
+      ffi.pointer(FILETIME),
+      ffi.pointer(FILETIME),
+      ffi.pointer(FILETIME),
+      ffi.pointer(FILETIME),
     ]),
-    waitForSingleObject: bind('WaitForSingleObject', 'uint32', [PVOID, 'uint32']),
-    closeHandle: bind('CloseHandle', 'int', [PVOID]),
+    waitForSingleObject: bind('WaitForSingleObject', 'uint32', [pvoid(), 'uint32']),
+    closeHandle: bind('CloseHandle', 'int', [pvoid()]),
   } as unknown as Win32Bindings
   return cachedBindings
 }
@@ -268,13 +300,14 @@ function win32Bindings(): Win32Bindings {
  * @param count - element count.
  * @returns the branded allocation pointer.
  */
-function allocNative(type: Parameters<typeof koffi.alloc>[0], count: number): NativePtr {
-  const value: unknown = koffi.alloc(type, count)
+function allocNative(type: Parameters<Koffi['alloc']>[0], count: number): NativePtr {
+  const value: unknown = koffi().alloc(type, count)
   return value as NativePtr
 }
 
 /** Enumerate the current process table through Toolhelp32. */
 function snapshotWindowsProcesses(bindings: Win32Bindings): ProcessEntry[] {
+  const ffi = koffi()
   const { PROCESSENTRY32W } = win32Structs()
   const snapshot = bindings.createToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
   /* v8 ignore next -- an invalid snapshot for the process flag is not producible through the public API;
@@ -283,10 +316,10 @@ function snapshotWindowsProcesses(bindings: Win32Bindings): ProcessEntry[] {
   const entries: ProcessEntry[] = []
   try {
     const entry = allocNative(PROCESSENTRY32W, 1)
-    koffi.encode(entry, 'uint32', PROCESSENTRY32W.size)
+    ffi.encode(entry, 'uint32', PROCESSENTRY32W.size)
     let ok = bindings.process32FirstW(snapshot, entry)
     while (ok !== 0) {
-      const record = koffi.decode(entry, PROCESSENTRY32W) as {
+      const record = ffi.decode(entry, PROCESSENTRY32W) as {
         th32ProcessID: number
         th32ParentProcessID: number
       }
@@ -313,7 +346,7 @@ function windowsProcessState(bindings: Win32Bindings, pid: number): WindowsProce
        cannot be staged deterministically; the absent-process path is covered and the caller
        treats undefined as a detector miss. */
     if (bindings.getProcessTimes(handle, creation, exit, kernel, user) === 0) return undefined
-    const record = koffi.decode(creation, FILETIME) as { dwLowDateTime: number; dwHighDateTime: number }
+    const record = koffi().decode(creation, FILETIME) as { dwLowDateTime: number; dwHighDateTime: number }
     const wait = bindings.waitForSingleObject(handle, 0)
     /* v8 ignore next -- an opened process handle has exactly one of these two
        zero-time wait states; an unexpected Win32 failure is an unreadable process. */
