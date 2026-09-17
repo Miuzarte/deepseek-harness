@@ -68,7 +68,7 @@ rebase 上游时如果上游动了这几个文件要重跑上面那套验证，�
 
 ## 5. 会话持久化的独占发布在安卓上退化成独占拷贝
 
-**问题**：`session-persistence-jsonl/src/generation.ts` 的 `publishCurrentExclusive` 用 `fs.link()` 把已 fsync 的临时文件发布成 `session.v<版本>.jsonl.zstd`，靠 `link` 的「目标已存在就 EEXIST」拿到**原子且独占**的目录项。而安卓 10+ 在应用数据目录里**禁止硬链接**，于是每次会话运行都以这条错误结束：
+**问题**：会话持久化用 `fs.link()` 做**不覆盖**的原子发布（`link` 在目标已存在时返回 `EEXIST`），而安卓 10+ 在应用数据目录里**禁止硬链接**，于是每次创建会话都以这条错误结束：
 
 ```
 EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<token>.tmp'
@@ -77,15 +77,22 @@ EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<t
 
 实测确认过这不是我们自己的路径问题：`run-as <pkg> sh -c 'cd files && ln a b'` 同样 `Permission denied`（`context=u:r:runas_app:s0`），硬链接在 app data 里就是被平台挡掉的。
 
-**做法**：`GenerationFileSystem` 加一个 `copyFile(existing, next, mode)`，`publishCurrentExclusive` 在 `link` 抛 `EACCES` / `EPERM` / `ENOTSUP` / `ENOSYS` 时改用 `fs.copyFile(staged, currentPath, COPYFILE_EXCL)` 发布，拿到 `EEXIST` 仍然走原来那条「已有赢家」的验证路径，其它 errno 原样抛出。
+**做法**：这个包里**有两处** `link()` 发布，两处都要有退路。
 
-判据是**错误码而不是平台**：link 能用的平台上行为一个字节都不变，只有拒绝 link 的沙盒才降级，所以这段也能在 Linux / macOS 上用注入的假 `link` 完整测到。
+| 位置 | 作用 | 退路 |
+| :-- | :-- | :-- |
+| `generation.ts` 的 `publishCurrentExclusive` | 发布 `session.v<版本>.jsonl.zstd` | `GenerationFileSystem` 加 `copyFile`，`isLinkUnavailable(error)` 时 `fs.copyFile(staged, currentPath, COPYFILE_EXCL)` |
+| `index.ts` 的 `materializePosix` | 发布会话日志（`writeSyncedTempFile` 写 `<log>.<hex12>.tmp` 再 link） | 同一个 `isLinkUnavailable`（从 `generation.ts` 导出），改成 `copyFile(tmp, finalPath, COPYFILE_EXCL)` |
 
-代价要写清楚：独占性还在（`O_CREAT|O_EXCL`），但目录项不再原子 —— 崩在拷贝中间会留下半截 `current`，而任何后续读取都要先过 `verifyCurrentFile`，所以结果是 fail-closed 而不是静默损坏。
+判据是**错误码而不是平台**（`EACCES` / `EPERM` / `ENOTSUP` / `ENOSYS`）：link 能用的平台上行为一个字节都不变，只有拒绝 link 的沙盒才降级，所以 `generation.ts` 那段能在 Linux / macOS 上用注入的假 `link` 完整测到。`materializePosix` 整段本来就在 `/* v8 ignore start */` 里（原注释写着 link 失败是测试不可达的 TOCTOU 竞态），所以那边只做真机验证。
+
+代价要写清楚：独占性还在（`O_CREAT|O_EXCL`，`EEXIST` 仍然是「别人先发布了」），但目录项不再原子 —— 崩在拷贝中间会留下半截 `current`，而任何后续读取都要先过 `verifyCurrentFile`，所以结果是 fail-closed 而不是静默损坏。
+
+**同一类还没补的洞**（记录在此，别忘）：`packages/attachment/attachment-local/src/store.ts` 也靠 `link()` 做内容寻址对象的发布与别名（L283 别名、L359 首次发布）。附件存储是纯内容寻址 + 摘要校验，硬链接只是省空间的优化，所以退路同样可以是一次拷贝 —— 但那条链路在安卓上还没验证过，等用到附件（图片 / `present`）时再补，补的时候照这里的形状来。
 
 **新增测试** 3 条（`tests/generation.spec.ts`）：拒绝 link 时靠拷贝发布成功、拷贝拿到 `EEXIST` 时接受已有的同一份目标、拷贝失败的 errno 原样抛出。
 
-验证：`vitest run packages/session/session-persistence-jsonl` 463 通过（13 个文件），`generation.ts` 行/分支/函数覆盖仍 100%，`tsc -b tsconfig.host.json` 0 错。
+验证：`vitest run packages/session/session-persistence-jsonl` 463 通过（13 个文件），`generation.ts` 行/分支/函数覆盖仍 100%，`tsc -b tsconfig.host.json` 0 错；真机上 `link` 的两条路径都验过（会话会话创建 + 一轮完整对话）。
 
 ## 服务器 / 新机器上同步
 

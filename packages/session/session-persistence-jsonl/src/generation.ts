@@ -236,7 +236,7 @@ function isEEXIST(error: unknown): boolean {
 }
 
 /** Whether the platform refuses to create a directory entry with the link syscall. */
-function isLinkUnavailable(error: unknown): boolean {
+export function isLinkUnavailable(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code
   return code === 'EACCES' || code === 'EPERM' || code === 'ENOTSUP' || code === 'ENOSYS'
 }
