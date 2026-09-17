@@ -93,6 +93,20 @@ export function assertServiceableBashConfig(config: Config): void {
 }
 
 /**
+ * The bash binary a public command runs in.
+ *
+ * A deployment that ships its own bash under a name PATH cannot carry — an
+ * Android native library, for instance — points `DSH_BASH` at that file. Every
+ * other deployment keeps resolving `bash` through PATH, so this changes nothing
+ * for them.
+ * @returns the executable to spawn for `bash -c`.
+ */
+function shellExecutable(): string {
+  const configured = process.env.DSH_BASH
+  return configured !== undefined && configured !== '' ? configured : 'bash'
+}
+
+/**
  * Local bash executor over `ctx.subprocess`. Bounded output, spill files,
  * managed-range SIGTERM→SIGKILL escalation, and quiescence are the subprocess
  * service's mechanics; this executor supplies their configured budgets per spawn, so a
@@ -211,7 +225,7 @@ export class LocalBashExecutor extends ShellExecutor {
   }
 
   async run(spec: ShellExecSpec): Promise<ShellRunResult> {
-    return this.runArgv(spec, ['bash', '-c', spec.command])
+    return this.runArgv(spec, [shellExecutable(), '-c', spec.command])
   }
 
   /**
@@ -242,7 +256,7 @@ export class LocalBashExecutor extends ShellExecutor {
   }
 
   start(spec: ShellExecSpec): ShellProcess {
-    return this.startArgv(spec, ['bash', '-c', spec.command])
+    return this.startArgv(spec, [shellExecutable(), '-c', spec.command])
   }
 
   /**

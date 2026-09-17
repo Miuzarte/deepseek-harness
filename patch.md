@@ -84,6 +84,7 @@ EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<t
 | `generation.ts` 的 `publishCurrentExclusive` | 发布 `session.v<版本>.jsonl.zstd` | `GenerationFileSystem` 加 `copyFile`，`isLinkUnavailable(error)` 时 `fs.copyFile(staged, currentPath, COPYFILE_EXCL)` |
 | `index.ts` 的 `materializePosix` | 发布会话日志（`writeSyncedTempFile` 写 `<log>.<hex12>.tmp` 再 link） | 同一个 `isLinkUnavailable`（从 `generation.ts` 导出），改成 `copyFile(tmp, finalPath, COPYFILE_EXCL)` |
 | `fs-local` 的 `writeFileAtomic` | 工具写新文件（`createIfAbsent`）时用 link 保证「不覆盖」 | 本包内自带一个同形的 `isLinkUnavailable`，改成 `copyFile(tempPath, absolutePath, COPYFILE_EXCL)`，**并补一次 `open(target,'r+')` + `sync()`** —— link 的持久性继承自已 fsync 的暂存文件，copy 不继承 |
+| `attachment-local` 的 `publishImmutableAlias` / `publishStagedObject` | 附件（内容寻址对象与别名）的「不覆盖」发布 | 两处合成一个 `publishExclusive(source, target, sha256)`：link 失败且是平台拒绝时 `copyFile(..., COPYFILE_EXCL)`，`EEXIST` 仍走原来的摘要校验；拷贝成功即返回，拷贝撞车才去比摘要 |
 
 `fs-local` 那条是写工作区文件时踩到的：暂存目录在 `/sdcard`（FUSE）上，`link` 同样被拒，于是模型连"新建一个文件"都做不到，报 `cannot write "...": EACCES ... link '...tmpdir/x.tmp' -> '.../x'`。它原有的 `throwGuardedCreateFailure` 已经会 inspect 目标来区分「撞车」和「没有硬链接支持」，所以退路只需在 `isLinkUnavailable` 为真时补一次拷贝，其余 errno 仍走原路。
 
@@ -91,11 +92,47 @@ EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<t
 
 代价要写清楚：独占性还在（`O_CREAT|O_EXCL`，`EEXIST` 仍然是「别人先发布了」），但目录项不再原子 —— 崩在拷贝中间会留下半截 `current`，而任何后续读取都要先过 `verifyCurrentFile`，所以结果是 fail-closed 而不是静默损坏。
 
-**同一类还没补的洞**（记录在此，别忘）：`packages/attachment/attachment-local/src/store.ts` 也靠 `link()` 做内容寻址对象的发布与别名（L283 别名、L359 首次发布）。附件存储是纯内容寻址 + 摘要校验，硬链接只是省空间的优化，所以退路同样可以是一次拷贝 —— 但那条链路在安卓上还没验证过，等用到附件（图片 / `present`）时再补，补的时候照这里的形状来。
-
-**新增测试** 3 条（`tests/generation.spec.ts`）+ 2 条（`tests/fsio.spec.ts`，其中一个把原来那条用 `EACCES` 断言 `FS_IO_ERROR` 的用例改成 `EIO`，因为 `EACCES` 现在会走退路）：拒绝 link 时靠拷贝发布成功、拷贝拿到 `EEXIST` 时接受已有目标 / 保留竞争者、拷贝失败的 errno 原样抛出。
+**附件那两处也补上了**：`attachment-local/src/store.ts` 的 `publishImmutableAlias` 与 `publishStagedObject` 同样用 `link()` 保「不覆盖」，现在合并成一个 `publishExclusive(source, target, sha256)`：平台拒绝 link 时退化成独占拷贝，拷贝自己成功就返回，`EEXIST`（无论是 link 还是 copy 报的）才去做摘要校验。内容寻址对象是只读且按摘要命名的，所以多一份字节换掉原子目录项可以接受。**新增测试** 3 条（`tests/generation.spec.ts`）+ 2 条（`tests/fsio.spec.ts`，其中一个把原来那条用 `EACCES` 断言 `FS_IO_ERROR` 的用例改成 `EIO`，因为 `EACCES` 现在会走退路）：拒绝 link 时靠拷贝发布成功、拷贝拿到 `EEXIST` 时接受已有目标 / 保留竞争者、拷贝失败的 errno 原样抛出。
 
 验证：`vitest run packages/session/session-persistence-jsonl` 463 通过（13 个文件），`generation.ts` 行/分支/函数覆盖仍 100%；`vitest run packages/fs/fs-local` 151 通过，`fsio.ts` 新分支全覆盖；`tsc -b tsconfig.host.json` 0 错。真机上 `link` 的三条路径都验过（会话创建 + 一轮完整对话 + 写工作区新文件）。
+
+## 6. 让部署方指定 bash 与 ripgrep 的可执行文件
+
+**问题**：安卓上这两样都没有，而两处调用点都写死了查找方式：
+
+| 调用点 | 找法 | 安卓上的结果 |
+| :-- | :-- | :-- |
+| `packages/shell/bash-local` | argv 写死 `['bash', '-c', …]`，靠 PATH | PATH 的七个目录里没有 bash（系统 shell 是 mksh），工具直接报 `spawn bash EACCES` |
+| `packages/fs/tool-fs-search` 的 `resolveRgPath()` | `pkg` 单文件运行时取 `<execPath>-rg` sidecar，否则解析 `@vscode/ripgrep` 的平台包 | `@vscode/ripgrep` 没有 android-arm64 变体，工具报 `ripgrep launch failed` |
+
+**不选 mksh 兜底**：`/system/bin/sh` 是 mksh（ksh 子集），`${v^^}` / `local -n` / `mapfile` / 花括号展开这些 bash 扩展没有，而模型是按 bash 写命令的 —— 那种「命令看着对、行为不对」的失败比直接报错更难查。工具链的缺口（只有 toybox 一套）换 shell 也治不了，那是另一场仗。
+
+**做法**：真 bash 与真 rg 都**当 jniLibs 发**（和 Node 完全同一套：名字以 `.so` 结尾、SONAME/NEEDED 归一成 `liblw*`、每个对象带 `$ORIGIN`、16 KB 对齐），调用点只加一个「部署方指定」的入口：
+
+| 环境变量 | 谁读 | 语义 |
+| :-- | :-- | :-- |
+| `DSH_BASH` | `bash-local/src/index.ts` 的 `shellExecutable()` | 设了且非空就用它，否则回退 PATH 上的 `bash` |
+| `DSH_RG_PATH` | `tool-fs-search/src/search-core.ts` 的 `resolveRgPath()` | 设了且非空就用它，否则走原来的 pkg sidecar / `@vscode/ripgrep` |
+
+判据是**环境变量而不是平台判断**：别的平台上两个变量都不设，行为与上游逐字一致；安卓这边由 app 把变量指进 `nativeLibraryDir`。
+
+**产物（Termux 编的 bionic 二进制，已 patchelf）**：
+
+| 对象 | 归一后 | 字节 |
+| :-- | :-- | :-- |
+| bash 5.3.15 | `liblwbash.so` | 1,132,857（patch 前 880,368） |
+| libandroid-support | `liblwandroidsupport.so` | 67,865 |
+| libreadline 8 | `liblwreadline.so` | 476,529 |
+| libncursesw 6 | `liblwncursesw.so` | 405,537 |
+| libiconv | `liblwiconv.so` | 1,116,049 |
+| ripgrep 15.2.0 (+pcre2) | `liblwrg.so` | 4,918,377 |
+| libpcre2-8 | `liblwpcre2.so` | 528,449 |
+
+合计 +8.2 MiB（jniLibs 105,944,793 → 114,590,456）。注意 patchelf 会让文件变大（bash +29%），和当年 Node 那批一样。
+
+**新增测试**：`bash-local/tests/executor.spec.ts` 两条（`DSH_BASH` 指向一个替身脚本时命令确实交给它跑、`DSH_BASH=''` 视同没配），`tool-fs-search/tests/rg-sidecar.spec.ts` 一条（`DSH_RG_PATH` 优先于任何打包产物）。**注意 bash-local 的测试在 Windows 上被 `vitest.config.ts` 排除**（没有 POSIX shell），所以这两条只在 Linux / macOS 上跑，安卓侧靠真机验证。
+
+验证：`vitest run packages/attachment/attachment-local` 93 通过且 `store.ts` 覆盖 100%；`vitest run packages/fs/tool-fs-search` 覆盖 `search-core.ts` 100%；`tsc -b tsconfig.host.json` 0 错；`run-oxlint` 0 错；真机上 bash 与 rg 都跑通（见下）。
 
 ## 服务器 / 新机器上同步
 

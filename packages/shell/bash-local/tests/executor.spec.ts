@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -42,6 +42,35 @@ async function readUntil(proc: ShellProcess, expected: string, timeoutMs = 5_000
 }
 
 describe('LocalBashExecutor.run', () => {
+  it('runs commands in the shell a deployment points DSH_BASH at', async () => {
+    // A stand-in for a shipped bash: the contract is which executable receives
+    // `-c <command>`, not that the stand-in is a bash.
+    const shipped = join(spillDir, 'lw-shipped-shell')
+    writeFileSync(shipped, '#!/bin/sh\necho "shipped:$*"\n', { mode: 0o755 })
+    process.env.DSH_BASH = shipped
+    try {
+      const { bash } = await setup({ timeoutMs: 5_000 })
+      const result = await bash.run(bash.resolve({ command: 'echo hi' }))
+
+      expect(result.stdout.text.trim()).toBe('shipped:-c echo hi')
+    } finally {
+      delete process.env.DSH_BASH
+      rmSync(shipped, { force: true })
+    }
+  })
+
+  it('treats an empty DSH_BASH as no configuration', async () => {
+    process.env.DSH_BASH = ''
+    try {
+      const { bash } = await setup({ timeoutMs: 5_000 })
+      const result = await bash.run(bash.resolve({ command: 'echo hi' }))
+
+      expect(result.stdout.text).toBe('hi\n')
+    } finally {
+      delete process.env.DSH_BASH
+    }
+  })
+
   it('resolves with output and the effective timeout', async () => {
     const { bash } = await setup({ timeoutMs: 5_000 })
     const result = await bash.run(bash.resolve({ command: 'echo hi' }))

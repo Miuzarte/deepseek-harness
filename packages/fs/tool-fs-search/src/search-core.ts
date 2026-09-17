@@ -170,6 +170,11 @@ let rgPathPromise: Promise<string> | undefined
  */
 export function resolveRgPath(): Promise<string> {
   rgPathPromise ??= Promise.resolve().then(async () => {
+    // A deployment that ships its own ripgrep points DSH_RG_PATH at it. The
+    // packaged binaries below cover the platforms the npm dependency supports,
+    // so this is the seam for a platform it does not.
+    const configured = process.env.DSH_RG_PATH
+    if (configured !== undefined && configured !== '') return configured
     const executable = parse(process.execPath)
     const executableSidecar = process.platform === 'win32'
       ? join(executable.dir, `${executable.name}-rg.exe`)

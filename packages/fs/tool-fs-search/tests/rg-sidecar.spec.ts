@@ -7,6 +7,7 @@ const { dependencyRgPath, existsSync } = vi.hoisted(() => ({
 }))
 const originalPlatform = process.platform
 const originalExecPath = process.execPath
+const originalRgPath = process.env.DSH_RG_PATH
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
@@ -18,12 +19,15 @@ vi.mock('@vscode/ripgrep', () => ({ rgPath: dependencyRgPath }))
 beforeEach(() => {
   vi.resetModules()
   existsSync.mockReset()
+  delete process.env.DSH_RG_PATH
   Reflect.deleteProperty(process, 'pkg')
   Reflect.defineProperty(process, 'platform', { configurable: true, enumerable: true, value: originalPlatform })
   process.execPath = originalExecPath
 })
 
 afterEach(() => {
+  if (originalRgPath === undefined) delete process.env.DSH_RG_PATH
+  else process.env.DSH_RG_PATH = originalRgPath
   Reflect.deleteProperty(process, 'pkg')
   Reflect.defineProperty(process, 'platform', { configurable: true, enumerable: true, value: originalPlatform })
   process.execPath = originalExecPath
@@ -52,6 +56,14 @@ describe('ripgrep resolution', () => {
 
     await expect(resolveRgPath()).resolves.toBe(sidecar)
     expect(existsSync).toHaveBeenCalledWith(sidecar)
+  })
+
+  it('uses a deployment-provided ripgrep before any packaged binary', async () => {
+    process.env.DSH_RG_PATH = '/data/app/lib/arm64/liblwrg.so'
+    const { resolveRgPath } = await import('@deepseek-ai/dsh-tool-fs-search')
+
+    await expect(resolveRgPath()).resolves.toBe('/data/app/lib/arm64/liblwrg.so')
+    expect(existsSync).not.toHaveBeenCalled()
   })
 
   it('uses the dependency binary in an ordinary Node process', async () => {
