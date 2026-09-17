@@ -83,6 +83,9 @@ EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<t
 | :-- | :-- | :-- |
 | `generation.ts` 的 `publishCurrentExclusive` | 发布 `session.v<版本>.jsonl.zstd` | `GenerationFileSystem` 加 `copyFile`，`isLinkUnavailable(error)` 时 `fs.copyFile(staged, currentPath, COPYFILE_EXCL)` |
 | `index.ts` 的 `materializePosix` | 发布会话日志（`writeSyncedTempFile` 写 `<log>.<hex12>.tmp` 再 link） | 同一个 `isLinkUnavailable`（从 `generation.ts` 导出），改成 `copyFile(tmp, finalPath, COPYFILE_EXCL)` |
+| `fs-local` 的 `writeFileAtomic` | 工具写新文件（`createIfAbsent`）时用 link 保证「不覆盖」 | 本包内自带一个同形的 `isLinkUnavailable`，改成 `copyFile(tempPath, absolutePath, COPYFILE_EXCL)`，**并补一次 `open(target,'r+')` + `sync()`** —— link 的持久性继承自已 fsync 的暂存文件，copy 不继承 |
+
+`fs-local` 那条是写工作区文件时踩到的：暂存目录在 `/sdcard`（FUSE）上，`link` 同样被拒，于是模型连"新建一个文件"都做不到，报 `cannot write "...": EACCES ... link '...tmpdir/x.tmp' -> '.../x'`。它原有的 `throwGuardedCreateFailure` 已经会 inspect 目标来区分「撞车」和「没有硬链接支持」，所以退路只需在 `isLinkUnavailable` 为真时补一次拷贝，其余 errno 仍走原路。
 
 判据是**错误码而不是平台**（`EACCES` / `EPERM` / `ENOTSUP` / `ENOSYS`）：link 能用的平台上行为一个字节都不变，只有拒绝 link 的沙盒才降级，所以 `generation.ts` 那段能在 Linux / macOS 上用注入的假 `link` 完整测到。`materializePosix` 整段本来就在 `/* v8 ignore start */` 里（原注释写着 link 失败是测试不可达的 TOCTOU 竞态），所以那边只做真机验证。
 
@@ -90,9 +93,9 @@ EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<t
 
 **同一类还没补的洞**（记录在此，别忘）：`packages/attachment/attachment-local/src/store.ts` 也靠 `link()` 做内容寻址对象的发布与别名（L283 别名、L359 首次发布）。附件存储是纯内容寻址 + 摘要校验，硬链接只是省空间的优化，所以退路同样可以是一次拷贝 —— 但那条链路在安卓上还没验证过，等用到附件（图片 / `present`）时再补，补的时候照这里的形状来。
 
-**新增测试** 3 条（`tests/generation.spec.ts`）：拒绝 link 时靠拷贝发布成功、拷贝拿到 `EEXIST` 时接受已有的同一份目标、拷贝失败的 errno 原样抛出。
+**新增测试** 3 条（`tests/generation.spec.ts`）+ 2 条（`tests/fsio.spec.ts`，其中一个把原来那条用 `EACCES` 断言 `FS_IO_ERROR` 的用例改成 `EIO`，因为 `EACCES` 现在会走退路）：拒绝 link 时靠拷贝发布成功、拷贝拿到 `EEXIST` 时接受已有目标 / 保留竞争者、拷贝失败的 errno 原样抛出。
 
-验证：`vitest run packages/session/session-persistence-jsonl` 463 通过（13 个文件），`generation.ts` 行/分支/函数覆盖仍 100%，`tsc -b tsconfig.host.json` 0 错；真机上 `link` 的两条路径都验过（会话会话创建 + 一轮完整对话）。
+验证：`vitest run packages/session/session-persistence-jsonl` 463 通过（13 个文件），`generation.ts` 行/分支/函数覆盖仍 100%；`vitest run packages/fs/fs-local` 151 通过，`fsio.ts` 新分支全覆盖；`tsc -b tsconfig.host.json` 0 错。真机上 `link` 的三条路径都验过（会话创建 + 一轮完整对话 + 写工作区新文件）。
 
 ## 服务器 / 新机器上同步
 
