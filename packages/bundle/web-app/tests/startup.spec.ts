@@ -126,6 +126,7 @@ describe('web command-line provider', () => {
     expect(observed.out).toContain('dsh --profile web')
     expect(observed.out).toContain('--no-open')
     expect(observed.out).toContain('--trusted-host')
+    expect(observed.out).toContain('--allow-lan')
     expect(values).toBeUndefined()
     expect(observed.readerConfig).toBeUndefined()
     expect(observed.exits).toEqual([0])
@@ -139,11 +140,18 @@ describe('web command-line provider', () => {
     expect(observed.exits).toEqual([1])
   })
 
-  it('rejects the intentionally unsupported all-interfaces host before the consumer activates', async () => {
+  it('rejects the all-interfaces host before the consumer activates unless --allow-lan accepts it', async () => {
     const { values, observed } = await bootProvider(['--host', '0.0.0.0'])
-    expect(observed.out).toContain('--host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead')
+    expect(observed.out).toContain('--host 0.0.0.0 serves this GUI to the whole network and is opt-in')
     expect(values).toBeUndefined()
     expect(observed.readerConfig).toBeUndefined()
     expect(observed.exits).toEqual([1])
+  })
+
+  it('publishes the all-interfaces host once --allow-lan accepts the exposure', async () => {
+    const { values, observed } = await bootProvider(['--host', '0.0.0.0', '--allow-lan'])
+    expect(values).toEqual({ openBrowser: true, host: '0.0.0.0', trustedHosts: [] })
+    expect(observed.readerConfig).toMatchObject({ host: '0.0.0.0' })
+    expect(observed.exits).toEqual([])
   })
 })

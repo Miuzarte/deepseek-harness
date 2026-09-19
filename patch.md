@@ -134,6 +134,23 @@ EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<t
 
 验证：`vitest run packages/attachment/attachment-local` 93 通过且 `store.ts` 覆盖 100%；`vitest run packages/fs/tool-fs-search` 覆盖 `search-core.ts` 100%；`tsc -b tsconfig.host.json` 0 错；`run-oxlint` 0 错；真机上 bash 与 rg 都跑通（见下）。
 
+## 7. 全接口监听改成显式开关
+
+**问题**：`--host` 本来就有，但 `--host 0.0.0.0` 被一条硬拒的安全闸挡下（`packages/bundle/web-app/src/startup.ts`）。部署方需要把 Web GUI 暴露给同一网络里的另一台设备，而绑具体网卡 IP 会随 DHCP 变化，绑 `0.0.0.0` 才是稳定写法；而且 `resolveLanTrust()` 与就绪行的 `(LAN: …)` 后缀本来就只对全接口绑定生效。
+
+**做法**：不删那道闸，把它从「一律拒绝」改成「要第二个旗标才放行」：
+
+| 旗标 | 语义 |
+| :-- | :-- |
+| `--host 0.0.0.0` | 单独用仍然报错，错误信息说明这会把 GUI 连同远程代码执行暴露给整个网络 |
+| `--host 0.0.0.0 --allow-lan` | 放行，并按既有逻辑把 LAN 地址算进 `/api` 的 browser-trust 栅栏、在就绪行打印 `(LAN: <url>?token=…)` |
+
+安全默认没变（不显式接管的部署仍然拿不到全接口绑定），而接管它的部署不必再改 dsh 源码。回环地址在 `0.0.0.0` 绑定下照旧可用，所以打印出的第一个 URL 与 `DSH_WEB_URL` 都不用动。
+
+涉及 `packages/bundle/web-app/src/startup.ts`、`packages/bundle/web-app/tests/startup.spec.ts`（改写那条拒绝用例、新增一条放行用例、help 断言里加 `--allow-lan`）。
+
+验证：`vitest run packages/bundle/web-app` 22 通过。
+
 ## 服务器 / 新机器上同步
 
 ```sh
