@@ -151,6 +151,51 @@ EACCES: permission denied, link '.../sessions/<session>/session.v3.jsonl.zstd.<t
 
 验证：`vitest run packages/bundle/web-app` 22 通过。
 
+## 8. 附件落盘的祖先 fsync 在安卓上会撞 `/data/user/0`
+
+**问题**：`read_image` 在一台小米 13 / Android 16 上**对任何 PNG 都失败**，报的是
+
+```
+EACCES: permission denied, open '/data/user/0'
+```
+
+注意路径不是那个文件，而是 `/data/user/0` 这层**目录**。设备上跑出来的栈：
+
+```
+attach.saveImage → commitPreparedImageFile → publishImmutableObject
+  → stageImmutableObject → ensureDurableHome(DSH_HOME)
+  → ensureDurableDirectory(home, '/') → syncDirectory('/data/user/0')
+  → open(dir, O_RDONLY) → EACCES
+```
+
+`ensureDurableDirectory` 为了让新建的目录项落盘，会从 DSH_HOME **一路 fsync 到文件系统根**（边界是 `parse(home).root`，也就是 `/`）；而安卓上 `/data/user/0` 是 `drwxrwx--x`（0711，上面那级 `/data/user` 是 `r-x--x--x`），应用能**穿过**、**不能读**，而 `open(dir, O_RDONLY)` 要的正是读权限 —— 于是每次落盘都在这层上抛错。桌面平台上这条链每一级都可读，所以上游遇不到。
+
+**为什么只有图片中招**：别的写盘路径不上这条“到根”的台阶 —— 会话持久化（`generation.ts`）与 `storage-json`（`atomic.ts`）只 fsync 文件自己那一级目录，而那一级在 DSH_HOME 里，读得开。
+
+**做法**：`syncDirectory()` 遇到**打不开的目录**就跳过，而不是让整个落盘失败：
+
+```ts
+let handle
+try {
+  handle = await open(path, constants.O_RDONLY)
+} catch (error) {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (code === 'EACCES' || code === 'EPERM') return
+  throw error
+}
+```
+
+判据仍是**错误码而不是平台**：能打开的地方行为一个字节都不变，只有“平台不让你打开这一级”时才跳过。那些层属于平台（安装时就建好、早已落盘），而这个进程**能**打开的那些层照样 fsync —— 拒绝整个落盘换来的不是更强的持久性，而是“一张图都存不进去”。
+
+**新增测试**：无。这条分支在开发机上不可达（`syncDirectory` 开头就 `process.platform === 'win32'` 返回，而 POSIX 桌面上每一级祖先都读得开），所以只能真机验证，代码里用 `/* v8 ignore */` 标了原因。
+
+**真机验证**（设备自己那份 host 树 + app 的 uid 直接调 store，见 `docs/step5-record.md` 的补记）：
+
+| 时刻 | 结果 |
+| :-- | :-- |
+| 修复前 | `saveImageFile` 抛 `EACCES: permission denied, open '/data/user/0'`，栈与本节一致 |
+| 修复后 | 同一个 191482 字节的 PNG 落盘成功；`readImageFile` 读回 191482 字节、`image/png`、1080x2400 |
+
 ## 服务器 / 新机器上同步
 
 ```sh

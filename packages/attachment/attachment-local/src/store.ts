@@ -128,12 +128,30 @@ export async function prepareImageFile(
  * A synced file alone does not survive a crash when its directory entry never
  * reached storage, so the publication directory is synced before a durable
  * reference is reported.
+ *
+ * A directory this process is not allowed to OPEN is skipped rather than
+ * refused. The walk in {@link ensureDurableHome} climbs to the filesystem root,
+ * and on Android an app may traverse `/data/user/0` (0711) without being able
+ * to read it, so every entry above the app's own data directory is unopenable
+ * by construction — and refusing there would mean no image could ever be
+ * stored. Those entries belong to the platform and were made durable when it
+ * created them; the levels this process CAN open are still synced. Only the two
+ * "you may not open this" codes are treated that way, so a real I/O failure
+ * still propagates.
  */
 async function syncDirectory(path: string): Promise<void> {
   /* v8 ignore next -- Windows cannot open directory handles; NTFS metadata journaling owns entry durability there. */
   if (process.platform === 'win32') return
   /* v8 ignore start -- Windows cannot exercise directory fsync; POSIX behavior tests enforce this peer. */
-  const handle = await open(path, constants.O_RDONLY)
+  let handle
+  try {
+    handle = await open(path, constants.O_RDONLY)
+  } catch (error) {
+    /* v8 ignore next 3 -- Android-only ancestor: the POSIX suite runs where every ancestor is readable. */
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    if (code === 'EACCES' || code === 'EPERM') return
+    throw error
+  }
   try {
     await handle.sync()
   } finally {
