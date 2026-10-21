@@ -159,17 +159,22 @@ let rgPathPromise: Promise<string> | undefined
 /**
  * The packaged ripgrep binary path, resolved lazily once per process.
  *
- * A single-file runtime uses the executable's `-rg` sidecar because a native
- * helper cannot be spawned from pkg's virtual filesystem. Node-mode builds
- * fall back to the platform package selected by `@vscode/ripgrep`. Resolving
- * at the call boundary keeps a missing or corrupt binary at the first search
- * call as `SEARCH_FAILED`, rather than failing the Loader composition.
+ * `DSH_RG_PATH` lets a deployment that ships ripgrep itself (a platform with no
+ * `@vscode/ripgrep` build, an app bundle, a jniLib) name that binary; an unset
+ * or empty value keeps the packaged lookup. A single-file runtime uses the
+ * executable's `-rg` sidecar because a native helper cannot be spawned from
+ * pkg's virtual filesystem. Node-mode builds fall back to the platform package
+ * selected by `@vscode/ripgrep`. Resolving at the call boundary keeps a missing
+ * or corrupt binary at the first search call as `SEARCH_FAILED`, rather than
+ * failing the Loader composition.
  *
  * @returns the packaged binary's absolute path; the memoized promise rejects
  *   when the platform package cannot be resolved.
  */
 export function resolveRgPath(): Promise<string> {
   rgPathPromise ??= Promise.resolve().then(async () => {
+    const configured = process.env.DSH_RG_PATH
+    if (configured !== undefined && configured !== '') return configured
     const executable = parse(process.execPath)
     const executableSidecar = process.platform === 'win32'
       ? join(executable.dir, `${executable.name}-rg.exe`)

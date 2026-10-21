@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { constants, createReadStream } from 'node:fs'
-import { chmod, link, mkdir, open, readFile, unlink } from 'node:fs/promises'
+import { chmod, copyFile, link, mkdir, open, readFile, unlink } from 'node:fs/promises'
 import { dirname, join, parse, resolve } from 'node:path'
 import {
   AttachmentError,
@@ -133,7 +133,18 @@ async function syncDirectory(path: string): Promise<void> {
   /* v8 ignore next -- Windows cannot open directory handles; NTFS metadata journaling owns entry durability there. */
   if (process.platform === 'win32') return
   /* v8 ignore start -- Windows cannot exercise directory fsync; POSIX behavior tests enforce this peer. */
-  const handle = await open(path, constants.O_RDONLY)
+  let handle: Awaited<ReturnType<typeof open>>
+  try {
+    handle = await open(path, constants.O_RDONLY)
+  } catch (error) {
+    // Android's /data/user/0 is traversable but not readable (0711), so the
+    // durable-ancestor walk hits EACCES on a directory the platform owns. Those
+    // levels were durable at install time; refusing the whole save would only
+    // keep every attachment off the device.
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    if (code === 'EACCES' || code === 'EPERM') return
+    throw error
+  }
   try {
     await handle.sync()
   } finally {
@@ -279,15 +290,7 @@ export async function publishImmutableAlias(
   try {
     const boundary = await ensureDurableHome(dirname(dirname(resolve(root))))
     await ensureDurableDirectory(parent, boundary)
-    try {
-      await link(source, target)
-    } catch (error) {
-      /* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error
-      if (await digestFile(target) !== sha256) {
-        throw new AttachmentError('Stored attachment failed integrity verification.', 'ATTACHMENT_CORRUPT')
-      }
-    }
+    await publishExclusive(source, target, sha256)
     await chmod(target, 0o400)
     const stop = resolve(root)
     for (let level = parent; level !== stop; level = dirname(level)) {
@@ -298,6 +301,50 @@ export async function publishImmutableAlias(
   } catch (error) {
     if (error instanceof AttachmentError) throw error
     throw new AttachmentError('Unable to persist attachment.', 'ATTACHMENT_WRITE_FAILED', { cause: error })
+  }
+}
+
+function isEEXIST(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'EEXIST'
+}
+
+/** Whether the platform refuses to create a directory entry with the link syscall. */
+function isLinkUnavailable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'EACCES' || code === 'EPERM' || code === 'ENOTSUP' || code === 'ENOSYS'
+}
+
+/**
+ * Publish `source` under the new name `target` without replacing an existing
+ * entry. The hard link is the primary primitive: atomic, free of extra bytes,
+ * and the source of the EEXIST that marks a concurrent dedup winner. A platform
+ * that refuses links inside application data (Android) gets an exclusive copy
+ * instead, which keeps the no-clobber guarantee at the cost of a second copy of
+ * the bytes — acceptable for an immutable content-addressed object, and any torn
+ * copy still has to pass the digest check below.
+ * @param source - existing object the new name points at.
+ * @param target - new name for the same bytes.
+ * @param expectedSha256 - digest an already-existing winner must match.
+ */
+async function publishExclusive(source: string, target: string, expectedSha256: string): Promise<void> {
+  try {
+    await link(source, target)
+    return
+  } catch (error) {
+    if (isLinkUnavailable(error)) {
+      try {
+        await copyFile(source, target, constants.COPYFILE_EXCL)
+        return
+      } catch (copyError) {
+        if (!isEEXIST(copyError)) throw copyError
+      }
+    } else if (!isEEXIST(error)) {
+      throw error
+    }
+  }
+  // Another writer won the race, so its bytes are the ones this name keeps.
+  if (await digestFile(target) !== expectedSha256) {
+    throw new AttachmentError('Stored attachment failed integrity verification.', 'ATTACHMENT_CORRUPT')
   }
 }
 
@@ -355,15 +402,7 @@ async function publishStagedObject(
   const parent = dirname(target)
   try {
     await ensureDurableDirectory(parent, staged.boundary)
-    try {
-      await link(staged.path, target)
-    } catch (error) {
-      /* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error
-      if (await digestFile(target) !== staged.sha256) {
-        throw new AttachmentError('Stored attachment failed integrity verification.', 'ATTACHMENT_CORRUPT')
-      }
-    }
+    await publishExclusive(staged.path, target, staged.sha256)
     // Windows shares the read-only attribute across hard links and refuses to
     // unlink either name once it is set, so discard the staging name first.
     await unlink(staged.path)

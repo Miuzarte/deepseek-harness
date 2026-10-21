@@ -135,15 +135,11 @@ async function keyboardTheme(host = stubConfigForm<ThemeSettings>()) {
 }
 
 describe('ui-theme apply', () => {
-  it('steps all font sizes in one settings mutation and one snapshot', async () => {
+  it('steps all font sizes in one snapshot without a Host write', async () => {
     const { theme, keyboard, events, host } = await keyboardTheme()
     keyboard.press()
     expect(theme.getTheme().fontSizes).toEqual({ text: 15, code: 12, terminal: 14 })
-    expect(host.mutate).toHaveBeenCalledExactlyOnceWith([
-      { op: 'set', path: ['fontSize'], value: 15 },
-      { op: 'set', path: ['codeFontSize'], value: 12 },
-      { op: 'set', path: ['terminalFontSize'], value: 14 },
-    ])
+    expect(host.mutate).not.toHaveBeenCalled()
     expect(host.set).not.toHaveBeenCalled()
     expect(events).toHaveLength(1)
     expect(events[0]?.fontSizes).toEqual({ text: 15, code: 12, terminal: 14 })
@@ -156,32 +152,23 @@ describe('ui-theme apply', () => {
     theme.setFontSize('terminal', 20)
     keyboard.press()
     expect(theme.getTheme().fontSizes).toEqual({ text: 22, code: 11, terminal: 20 })
-    expect(host.mutate).toHaveBeenCalledExactlyOnceWith([
-      { op: 'set', path: ['codeFontSize'], value: 11 },
-    ])
     keyboard.press({ code: 'Minus' })
     expect(theme.getTheme().fontSizes).toEqual({ text: 21, code: 10, terminal: 19 })
     keyboard.press({ code: 'Minus' })
     expect(theme.getTheme().fontSizes).toEqual({ text: 20, code: 10, terminal: 18 })
-    expect(host.mutate).toHaveBeenLastCalledWith([
-      { op: 'set', path: ['fontSize'], value: 20 },
-      { op: 'set', path: ['terminalFontSize'], value: 18 },
-    ])
+    expect(host.mutate).not.toHaveBeenCalled()
   })
 
-  it('adopts all durable font sizes together after a refused batch settles', async () => {
+  it('ignores a Host section published after a local font-size change', async () => {
     const host = stubConfigForm<ThemeSettings>()
     const section: ThemeSettings = { preference: 'system', fontSize: 14, codeFontSize: 11, terminalFontSize: 13,
       textFontFamily: '', codeFontFamily: '', terminalFontFamily: '' }
     host.publish({ status: 'ready', value: section, revision: 1, writable: true })
     const { theme, keyboard } = await keyboardTheme(host)
-    const write = Promise.withResolvers<boolean>()
-    host.mutate.mockReturnValue(write.promise)
     keyboard.press()
     host.publish({ value: section, revision: 2 })
     expect(theme.getTheme().fontSizes).toEqual({ text: 15, code: 12, terminal: 14 })
-    write.resolve(false)
-    await vi.waitFor(() => { expect(theme.getTheme().fontSizes).toEqual({ text: 14, code: 11, terminal: 13 }) })
+    expect(host.mutate).not.toHaveBeenCalled()
   })
 
   it.each(['macos', 'windows', 'linux'] as const)('shares %s font shortcuts with the settings control and durable values', async (platform) => {
@@ -202,12 +189,7 @@ describe('ui-theme apply', () => {
     face.setFontSize('text', 20)
     keyboard.press()
     expect(theme.getTheme().fontSizes).toEqual({ text: 21, code: 13, terminal: 15 })
-    await vi.waitFor(() => { expect(b.mutate).toHaveBeenCalledTimes(5) })
-    expect(b.mutate.mock.calls.at(-1)?.[1]).toEqual([
-      { op: 'set', path: ['fontSize'], value: 21 },
-      { op: 'set', path: ['codeFontSize'], value: 13 },
-      { op: 'set', path: ['terminalFontSize'], value: 15 },
-    ])
+    expect(b.mutate).not.toHaveBeenCalled()
     expect(theme.getTheme().fontSizes).toEqual({ text: 21, code: 13, terminal: 15 })
 
     await fiber.dispose()
@@ -259,16 +241,14 @@ describe('ui-theme apply', () => {
     theme.setFontSize('text', 22)
     theme.setFontSize('code', 16)
     theme.setFontSize('terminal', 20)
-    await vi.waitFor(() => { expect(b.mutate).toHaveBeenCalledTimes(3) })
     expect(keyboard.press()).toHaveBeenCalledOnce()
     expect(keyboard.press({ shift: true })).toHaveBeenCalledOnce()
     theme.setFontSize('text', 10)
     theme.setFontSize('code', 10)
     theme.setFontSize('terminal', 10)
-    await vi.waitFor(() => { expect(b.mutate).toHaveBeenCalledTimes(6) })
     expect(keyboard.press({ code: 'Minus' })).toHaveBeenCalledOnce()
     expect(theme.getTheme().fontSizes).toEqual({ text: 10, code: 10, terminal: 10 })
-    expect(b.mutate).toHaveBeenCalledTimes(6)
+    expect(b.mutate).not.toHaveBeenCalled()
     await b.ctx.fiber.dispose()
   })
 
@@ -339,7 +319,8 @@ describe('ui-theme apply', () => {
     face.setTheme('system')
     expect(theme.getTheme().preference).toBe('system')
     expect(instance.getSnapshot().preference).toBe('system')
-    await vi.waitFor(() => { expect(b.mutate).toHaveBeenCalledTimes(2) })
+    // Appearance writes stay in this browser; the Host document is untouched.
+    expect(b.mutate).not.toHaveBeenCalled()
   })
 
   it('projects font-size snapshots into its row store and routes face writes back', async () => {
@@ -357,7 +338,7 @@ describe('ui-theme apply', () => {
     face.setFontSize('text', 12)
     expect(theme.getTheme().fontSizes.text).toBe(12)
     expect(instance.getSnapshot().fontSizes.text).toBe(12)
-    await vi.waitFor(() => { expect(b.mutate).toHaveBeenCalledTimes(2) })
+    expect(b.mutate).not.toHaveBeenCalled()
   })
 
   it('projects font snapshots into the shared font store and routes group writes by role', async () => {
@@ -374,10 +355,10 @@ describe('ui-theme apply', () => {
     group.face.setFontSize('terminal', 16)
     expect(theme.getTheme().fontFamilies).toEqual({ text: '', code: '"Iosevka"', terminal: '"MesloLGS NF"' })
     expect(group.instance.getSnapshot().fontSizes.terminal).toBe(16)
-    await vi.waitFor(() => { expect(b.mutate).toHaveBeenCalledTimes(3) })
+    expect(b.mutate).not.toHaveBeenCalled()
   })
 
-  it('loads Host settings at boot, refreshes its namespace, and persists for a trusted remote page', async () => {
+  it('loads Host settings at boot, refreshes its namespace, and keeps appearance browser-local', async () => {
     const b = await bench()
     // The shared mirror read once at bench time; a Host-side change reaches it
     // through the document invalidation, exactly as production announces one.
@@ -400,15 +381,15 @@ describe('ui-theme apply', () => {
     b.ctx.emit('connection/reset')
     await vi.waitFor(() => { expect(theme.getTheme().preference).toBe('dark') })
 
-    // A non-loopback page persists through the same path as loopback.
+    // Appearance is browser-local on every page, including a trusted remote one;
+    // the Host document supplies only the deployment default.
     const remote = await bench(false)
     declareItems(remote.slots)
     await remote.ctx.plugin({ inject: [...inject], apply }).await()
     const remoteTheme = remote.ctx.get('theme') as ThemeRuntime
     remoteTheme.setTheme('dark')
-    await vi.waitFor(() => {
-      expect(remote.mutate).toHaveBeenCalledWith(THEME_SETTINGS_NAMESPACE, [{ op: 'set', path: ['preference'], value: 'dark' }], 0)
-    })
+    expect(remoteTheme.getTheme().preference).toBe('dark')
+    expect(remote.mutate).not.toHaveBeenCalled()
   })
 
   it('activates before a slow settings refresh and converges when it settles', async () => {

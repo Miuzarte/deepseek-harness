@@ -264,6 +264,46 @@ describe('web-app runtime glue', () => {
   })
 
 
+  it('prints each admitted LAN address beside a wildcard bind', async () => {
+    stageDist()
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    ctx.provide('webServer', fakeHttpServer('0.0.0.0').server)
+    provideConnection(ctx)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    apply(ctx, new Config({
+      openBrowser: false,
+      printUrl: true,
+      surfaceContext: false,
+      lanHosts: ['192.168.1.5', '10.0.0.9'],
+    }))
+    await vi.waitFor(() => { expect(log).toHaveBeenCalledWith('dsh web (LAN): http://192.168.1.5:4567/?token=test-token') })
+
+    expect(log).toHaveBeenCalledWith('dsh web: http://0.0.0.0:4567/?token=test-token')
+    expect(log).toHaveBeenCalledWith('dsh web (LAN): http://10.0.0.9:4567/?token=test-token')
+  })
+
+  it('does not print LAN addresses when a public URL replaces the advertised root', async () => {
+    stageDist()
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    ctx.provide('webServer', fakeHttpServer('0.0.0.0').server)
+    provideConnection(ctx)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    apply(ctx, new Config({
+      openBrowser: false,
+      printUrl: true,
+      surfaceContext: false,
+      publicUrl: 'https://app.example/ui/',
+      lanHosts: ['192.168.1.5'],
+    }))
+    await vi.waitFor(() => { expect(log).toHaveBeenCalledWith('dsh web: https://app.example/ui/?token=test-token') })
+
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('dsh web (LAN):'))
+  })
+
   it('drops an IPv6 zone id from the advertised URL', async () => {
     stageDist()
     const ctx = new Context()
