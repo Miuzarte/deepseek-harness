@@ -143,6 +143,14 @@ pnpm run build
 pnpm dsh web --host 0.0.0.0 --allow-lan --port 3080 --no-open
 ```
 
-启动行会打印 `dsh web: …` 和若干 `dsh web (LAN): …`；用后者在手机/另一台电脑打开。需要长期运行就套 systemd 或 tmux，并把 `DEEPSEEK_API_KEY` 放进 `~/.dsh/.credentials.yaml` 或环境变量。
+启动行会打印 `dsh web: …` 和若干 `dsh web (LAN): …`；用后者在手机/另一台电脑打开。容器网桥（`docker0`、`br-<id>`）不会进入 LAN trust 或打印列表。
+
+**更安全的做法**：如果服务器在 ZeroTier 上，直接绑 ZeroTier 地址（例如 `192.168.168.10`），只对该虚拟网络开放，也不需要 `--allow-lan`：
+
+```sh
+pnpm dsh web --host 192.168.168.10 --port 3080 --no-open
+```
+
+需要长期运行就套 systemd 或 tmux，并把 `DEEPSEEK_API_KEY` 放进 `~/.dsh/.credentials.yaml` 或环境变量。
 
 **注意**：`--allow-lan` 把 GUI 暴露给整个可达网络；只应在家用/ZeroTier 等可信网络使用，或在前面加 TLS 反向代理并只用 `--trusted-host` 声明 authority。
