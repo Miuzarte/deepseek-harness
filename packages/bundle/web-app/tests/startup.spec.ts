@@ -12,7 +12,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import { internals, provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { afterEach, describe, expect, it } from 'vitest'
-import { apply, WEB_STARTUP_SERVICE, type WebStartupValues } from '../src/startup.ts'
+import { apply, lanIPv4Addresses, WEB_STARTUP_SERVICE, type WebStartupValues } from '../src/startup.ts'
 
 /** What one fixture boot observed. */
 interface Observed {
@@ -60,7 +60,9 @@ export const apply = ctx => globalThis.__webStartupApply(ctx)
     `  name: ${pathToFileURL(join(dir, 'reader.mjs')).href}`,
     `  inject: [${WEB_STARTUP_SERVICE}]`,
     '  config:',
+    '    allowLan: !!js ctx.webStartup.allowLan',
     "    host: !!js ctx.webStartup.host ?? '127.0.0.1'",
+    '    lanHosts: !!js ctx.webStartup.lanHosts',
     '    openBrowser: !!js ctx.webStartup.openBrowser',
     '    port: !!js ctx.webStartup.port ?? 3080',
     '    publicUrl: !!js ctx.webStartup.publicUrl',
@@ -105,7 +107,9 @@ describe('web command-line provider', () => {
       '--tls-key', 'private-key.pem',
     ])
     expect(values).toEqual({
+      allowLan: false,
       host: '127.0.0.1',
+      lanHosts: [],
       openBrowser: false,
       port: 8080,
       trustedHosts: ['lab.internal', 'lab-2.internal', '10.0.0.9'],
@@ -125,11 +129,37 @@ describe('web command-line provider', () => {
     expect(observed.exits).toEqual([1])
   })
 
+  it('admits a wildcard bind only with --allow-lan', async () => {
+    const { values, observed } = await bootProvider(['--host', '0.0.0.0', '--allow-lan'])
+    expect(values).toMatchObject({ allowLan: true, host: '0.0.0.0' })
+    expect(values?.trustedHosts).toEqual(expect.arrayContaining(values?.lanHosts ?? []))
+    expect(observed.readerConfig).toMatchObject({
+      allowLan: true,
+      host: '0.0.0.0',
+      lanHosts: values?.lanHosts,
+      trustedHosts: values?.trustedHosts,
+    })
+    expect(observed.exits).toEqual([])
+  })
+
+  it('collects unique non-loopback IPv4 addresses for LAN trust', () => {
+    expect(lanIPv4Addresses({
+      lo: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4', mac: '00:00:00:00:00:00', internal: true, cidr: '127.0.0.1/8' }],
+      eth0: [
+        { address: '192.168.1.5', netmask: '255.255.255.0', family: 'IPv4', mac: '00:00:00:00:00:01', internal: false, cidr: '192.168.1.5/24' },
+        { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', mac: '00:00:00:00:00:01', internal: false, cidr: 'fe80::1/64', scopeid: 2 },
+      ],
+      wlan0: [{ address: '192.168.1.5', netmask: '255.255.255.0', family: 'IPv4', mac: '00:00:00:00:00:02', internal: false, cidr: '192.168.1.5/24' }],
+    })).toEqual(['192.168.1.5'])
+  })
+
   it('leaves deployment values to each consumer when flags omit them', async () => {
     const { values, observed } = await bootProvider([])
-    expect(values).toEqual({ openBrowser: true, trustedHosts: [] })
+    expect(values).toEqual({ allowLan: false, lanHosts: [], openBrowser: true, trustedHosts: [] })
     expect(observed.readerConfig).toEqual({
+      allowLan: false,
       host: '127.0.0.1',
+      lanHosts: [],
       openBrowser: true,
       port: 3080,
       trustedHosts: [],
@@ -139,6 +169,7 @@ describe('web command-line provider', () => {
   it('prints its own help and leaves the consumer pending', async () => {
     const { values, observed } = await bootProvider(['--help'])
     expect(observed.out).toContain('dsh --profile web')
+    expect(observed.out).toContain('--allow-lan')
     expect(observed.out).toContain('--no-open')
     expect(observed.out).toContain('--public-url')
     expect(observed.out).toContain('--trusted-host')
@@ -161,12 +192,16 @@ describe('web command-line provider', () => {
       '--trusted-host', 'lab.internal',
     ])
     expect(values).toEqual({
+      allowLan: false,
+      lanHosts: [],
       openBrowser: true,
       publicUrl: 'https://web.example/ui',
       trustedHosts: ['lab.internal'],
     })
     expect(observed.readerConfig).toEqual({
+      allowLan: false,
       host: '127.0.0.1',
+      lanHosts: [],
       openBrowser: true,
       port: 3080,
       publicUrl: 'https://web.example/ui',

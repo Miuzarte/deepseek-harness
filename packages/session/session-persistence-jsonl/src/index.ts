@@ -13,8 +13,8 @@ import {
   SessionFormatUnsupportedMigrationError,
   sessionFormatCatalog,
 } from '@deepseek-ai/dsh-session-format-catalog'
-import { readdirSync, type Dirent } from 'node:fs'
-import { open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
+import { readdirSync, type Dirent, constants as fsConstants } from 'node:fs'
+import { copyFile, open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
@@ -48,6 +48,7 @@ import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 import { verifyCurrentGenerationInWorker } from './migration-verifier.ts'
 import { prepareCatalogFacts } from './catalog-migration.ts'
 import {
+  isLinkUnavailable,
   JsonlGenerationSourceChangedError,
   JsonlGenerationUnsupportedMigrationError,
   prepareJsonlMigration,
@@ -1299,9 +1300,16 @@ class JsonlSessionPersistence extends SessionPersistence {
     // Publish via link()+unlink(), NOT rename(): link fails with EEXIST if the
     // final path already exists, so two processes materializing the same id
     // concurrently cannot clobber each other. rename() would silently overwrite.
+    // A platform that refuses hard links inside app data (Android) gets the same
+    // no-clobber guarantee from an exclusive copy.
     let linked = false
     try {
-      await link(tmp, finalPath)
+      try {
+        await link(tmp, finalPath)
+      } catch (error) {
+        if (!isLinkUnavailable(error)) throw error
+        await copyFile(tmp, finalPath, fsConstants.COPYFILE_EXCL)
+      }
       linked = true
     } finally {
       // Remove an unpublished temp on failure. After publication, defer cleanup

@@ -41,6 +41,8 @@ const refuse = vi.hoisted(() => ({
   flock: false,
   /** Next flock call fails EWOULDBLOCK. */
   flockBusy: false,
+  /** Every flock call reports a platform with no native binding. */
+  flockUnsupported: false,
   /** Next stat of a lock file fails EACCES (unreadable path). */
   lockStat: false,
   /** For N further lock-path stats: unlink and recreate the file first, so the locked inode is orphaned. */
@@ -88,6 +90,9 @@ vi.mock('@deepseek-ai/node-addon-system/flock', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@deepseek-ai/node-addon-system/flock')>()
   return {
     tryLockExclusive: async (fd: number): Promise<void> => {
+      if (refuse.flockUnsupported) {
+        throw Object.assign(new Error('flock is not supported on android-arm64'), { code: 'ERR_FLOCK_UNSUPPORTED_PLATFORM' })
+      }
       if (refuse.flock) {
         refuse.flock = false
         throw Object.assign(new Error('EACCES: injected flock refusal'), { code: 'EACCES' })
@@ -108,6 +113,7 @@ afterEach(async () => {
   refuse.lockOpen = false
   refuse.flock = false
   refuse.flockBusy = false
+  refuse.flockUnsupported = false
   refuse.lockStat = false
   refuse.swapLockOnStat = 0
   refuse.dropLockOnStat = false
@@ -282,6 +288,17 @@ describe('cross-process write lock', () => {
 
     refuse.flock = true
     await expect(backend.open(SessionId('flock-blocked'), 'write')).rejects.toThrow(/EACCES/)
+  })
+
+  it.skipIf(process.platform === 'win32')('treats a platform without a flock binding as the single writer', async () => {
+    const root = await freshRoot()
+    const backend = await mount(root)
+    refuse.flockUnsupported = true
+
+    const writer = await backend.create(meta('no-flock'))
+    await writer.append([...EVENTS])
+    await writer.close()
+    await expect(backend.open(SessionId('no-flock'), 'read')).resolves.toBeDefined()
   })
 
   it.skipIf(process.platform === 'win32')('maps the EWOULDBLOCK contention spelling to already-owned', async () => {

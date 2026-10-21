@@ -19,6 +19,8 @@ import {
 const fsControl = vi.hoisted(() => ({
   readSignals: [] as AbortSignal[],
   syncedDirectories: [] as string[],
+  linkError: undefined as NodeJS.ErrnoException | undefined,
+  copyError: undefined as NodeJS.ErrnoException | undefined,
 }))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -36,6 +38,16 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     async open(...args: Parameters<typeof actual.open>): ReturnType<typeof actual.open> {
       if (args[1] === constants.O_RDONLY) fsControl.syncedDirectories.push(String(args[0]))
       return actual.open(...args)
+    },
+    // A platform without hard links (Android app data) reaches the exclusive-copy
+    // fallback; the real link is used everywhere else.
+    async link(...args: Parameters<typeof actual.link>): ReturnType<typeof actual.link> {
+      if (fsControl.linkError !== undefined) throw fsControl.linkError
+      return actual.link(...args)
+    },
+    async copyFile(...args: Parameters<typeof actual.copyFile>): ReturnType<typeof actual.copyFile> {
+      if (fsControl.copyError !== undefined) throw fsControl.copyError
+      return actual.copyFile(...args)
     },
   }
 })
@@ -76,6 +88,8 @@ function parentChainToRoot(path: string): string[] {
 }
 
 afterEach(async () => {
+  fsControl.linkError = undefined
+  fsControl.copyError = undefined
   await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
@@ -146,6 +160,64 @@ describe('local attachment store', () => {
     await saveImageFile(storageRoot, { data: PNG, mediaType: 'image/png' }, LIMITS, POLICY)
     if (process.platform !== 'win32') expect((await stat(object)).mode & 0o777).toBe(0o400)
     await expect(readImageFile(storageRoot, first)).resolves.toEqual({ ref: first, data: PNG })
+  })
+
+  it('publishes by exclusive copy when the platform denies hard links', async () => {
+    const storageRoot = await root()
+    const sha256 = createHash('sha256').update(PNG).digest('hex')
+    const target = join(storageRoot, 'objects', sha256.slice(0, 2), sha256)
+    fsControl.linkError = Object.assign(new Error('link denied'), { code: 'EACCES' })
+
+    await publishImmutableObject(storageRoot, target, PNG, sha256)
+
+    expect(new Uint8Array(await readFile(target))).toEqual(PNG)
+    expect(await readdir(join(storageRoot, 'tmp'))).toEqual([])
+  })
+
+  it('keeps a competitor that wins the exclusive-copy fallback', async () => {
+    const storageRoot = await root()
+    const sha256 = createHash('sha256').update(PNG).digest('hex')
+    const target = join(storageRoot, 'objects', sha256.slice(0, 2), sha256)
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, PNG)
+    fsControl.linkError = Object.assign(new Error('link denied'), { code: 'EACCES' })
+
+    await publishImmutableObject(storageRoot, target, PNG, sha256)
+
+    expect(new Uint8Array(await readFile(target))).toEqual(PNG)
+  })
+
+  it('rejects an existing object whose bytes differ from the publication', async () => {
+    const storageRoot = await root()
+    const sha256 = createHash('sha256').update(PNG).digest('hex')
+    const target = join(storageRoot, 'objects', sha256.slice(0, 2), sha256)
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, 'different bytes')
+    fsControl.linkError = Object.assign(new Error('link denied'), { code: 'EACCES' })
+
+    await expect(publishImmutableObject(storageRoot, target, PNG, sha256))
+      .rejects.toMatchObject({ code: 'ATTACHMENT_CORRUPT' })
+  })
+
+  it('propagates a publication failure that is neither a collision nor a missing link', async () => {
+    const storageRoot = await root()
+    const sha256 = createHash('sha256').update(PNG).digest('hex')
+    const target = join(storageRoot, 'objects', sha256.slice(0, 2), sha256)
+    fsControl.linkError = Object.assign(new Error('link failed'), { code: 'EIO' })
+
+    await expect(publishImmutableObject(storageRoot, target, PNG, sha256))
+      .rejects.toMatchObject({ code: 'ATTACHMENT_WRITE_FAILED' })
+  })
+
+  it('propagates an exclusive-copy failure', async () => {
+    const storageRoot = await root()
+    const sha256 = createHash('sha256').update(PNG).digest('hex')
+    const target = join(storageRoot, 'objects', sha256.slice(0, 2), sha256)
+    fsControl.linkError = Object.assign(new Error('link denied'), { code: 'EACCES' })
+    fsControl.copyError = Object.assign(new Error('copy failed'), { code: 'ENOSPC' })
+
+    await expect(publishImmutableObject(storageRoot, target, PNG, sha256))
+      .rejects.toMatchObject({ code: 'ATTACHMENT_WRITE_FAILED' })
   })
 
   it('rejects publication when the supplied digest does not match the staged bytes', async () => {

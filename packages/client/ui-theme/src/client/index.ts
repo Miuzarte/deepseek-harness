@@ -2,11 +2,13 @@
  * Browser theme registry over the `--dsw-*` token stylesheets. The service
  * owns the live theme preference (light/dark/system), resolves `system` through
  * `prefers-color-scheme`, and publishes immutable snapshots; it never touches
- * the DOM — ui-layout's presenter consumes the resolved snapshot. The Host
- * settings scope loads and stores the preference in the user-settings
- * document. The plugin also registers the Appearance and font settings rows
- * into the settings General section — the theme feature owns its own settings
- * surface. Desktop shortcuts adjust text, code, and terminal font sizes together.
+ * the DOM — ui-layout's presenter consumes the resolved snapshot. Writes land
+ * in this browser's `localStorage`, so one person's desktop and phone keep
+ * different font sizes; the Host settings section stays the deployment default
+ * a browser inherits until it stores a value of its own. The plugin also
+ * registers the Appearance and font settings rows into the settings General
+ * section — the theme feature owns its own settings surface. Desktop shortcuts
+ * adjust text, code, and terminal font sizes together.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { BoundActions } from '@deepseek-ai/dsh-client-ui-slots'
@@ -30,7 +32,7 @@ import { installThemeStyles } from './styles.ts'
 import { en, ja, es, fr, de, ru, pt, zh, type ThemeKey } from './locales.ts'
 import {
   DEFAULT_FONT_SIZES, DEFAULT_PREFERENCE, FONT_FAMILY_FIELDS, FONT_ROLES, FONT_SIZE_SPECS,
-  fontFamilyVariable, isFontSize, isThemePreference, normalizeFontFamily, sectionFontSizes,
+  fontFamilyVariable, isFontSize, isThemePreference, LOCAL_THEME_STORAGE_KEY, normalizeFontFamily,
   THEME_PREFERENCE_FIELD, THEME_SETTINGS_NAMESPACE,
   type FontFamilies, type FontRole, type FontSizes, type ThemePreference, type ThemeSettings,
 } from '../theme-settings.ts'
@@ -186,8 +188,8 @@ export class ThemeRuntime {
   private fontSizes: FontSizes = bootstrapFontSizes()
   private fontFamilies: FontFamilies = bootstrapFontFamilies()
   private revision = 0
-  /** Own settings writes not yet settled; adoption waits for zero so a Host echo of an earlier write cannot revert a later local change. */
-  private pendingWrites = 0
+  /** This browser's stored override; absent until it stores a value of its own. */
+  private local: Partial<ThemeSettings> | undefined = readLocalTheme()
   private snapshot: ThemeSnapshot
   private readonly media: MediaQueryList | undefined
   /** Override layers by source; seq (monotonic) is the stacking order. */
@@ -197,7 +199,7 @@ export class ThemeRuntime {
   /**
    * @param ctx - owning context (change events are emitted on it; the
    * media-query and scope listeners are released through ctx.effect on dispose).
-   * @param host - durable preference scope owned by the same plugin.
+   * @param host - deployment fallback scope this browser inherits until it stores its own value.
    */
   constructor(ctx: ClientContext, host: ConfigForm<ThemeSettings>) {
     this.ctx = ctx
@@ -251,8 +253,8 @@ export class ThemeRuntime {
 
   /**
    * Switch the theme preference — the only user preference write entry.
-   * Built-in preferences are written through the settings scope and every
-   * accepted value emits `theme/change`.
+   * Built-in preferences are stored in this browser and every accepted value
+   * emits `theme/change`.
    * @param id - a registered theme id or `system`; unknown ids throw.
    */
   setTheme(id: string): void {
@@ -261,13 +263,17 @@ export class ThemeRuntime {
     }
     if (this.preference === id) return
     this.preference = id as ThemePreference
-    if (isThemePreference(id)) this.write(() => this.host.set(THEME_PREFERENCE_FIELD, id))
+    if (isThemePreference(id)) {
+      const patch: Partial<ThemeSettings> = {}
+      patch[THEME_PREFERENCE_FIELD] = id
+      this.persistLocal(patch)
+    }
     this.publish()
   }
 
   /**
-   * Change one role's font size. Accepted
-   * values are written through the settings scope and emit `theme/change`.
+   * Change one role's font size. Accepted values are stored in this browser
+   * and emit `theme/change`.
    * @param role - font role.
    * @param px - integer px within the role's `FONT_SIZE_SPECS` range; out-of-range or fractional values throw.
    */
@@ -276,7 +282,9 @@ export class ThemeRuntime {
     if (!isFontSize(role, px)) throw new Error(`${role} font size ${px} is outside ${spec.min}..${spec.max}`)
     if (this.fontSizes[role] === px) return
     this.fontSizes = Object.freeze({ ...this.fontSizes, [role]: px })
-    this.write(() => this.host.set(spec.field, px))
+    const patch: Partial<ThemeSettings> = {}
+    patch[spec.field] = px
+    this.persistLocal(patch)
     this.publish()
   }
 
@@ -287,25 +295,24 @@ export class ThemeRuntime {
    */
   private adjustFontSizes(delta: 1 | -1): void {
     const fontSizes = { ...this.fontSizes }
-    const fields: Record<string, number> = {}
+    const patch: Partial<ThemeSettings> = {}
     for (const role of FONT_ROLES) {
       const { field, min, max } = FONT_SIZE_SPECS[role]
       const px = Math.max(min, Math.min(max, fontSizes[role] + delta))
       if (px === fontSizes[role]) continue
       fontSizes[role] = px
-      fields[field] = px
+      patch[field] = px
     }
-    const ops = Object.entries(fields).map(([field, value]) => ({ op: 'set' as const, path: [field], value }))
-    if (ops.length === 0) return
+    if (Object.keys(patch).length === 0) return
     this.fontSizes = Object.freeze(fontSizes)
-    this.write(() => this.host.mutate(ops))
+    this.persistLocal(patch)
     this.publish()
   }
 
   /**
    * Change one role's font list — the only font-family write entry. The value
-   * is normalized, written through the settings scope, and emits `theme/change`
-   * when the normalized list differs.
+   * is normalized, stored in this browser, and emits `theme/change` when the
+   * normalized list differs.
    * @param role - font role.
    * @param value - comma-separated family names; a value without names restores the built-in stack.
    */
@@ -313,29 +320,40 @@ export class ThemeRuntime {
     const list = normalizeFontFamily(value)
     if (this.fontFamilies[role] === list) return
     this.fontFamilies = Object.freeze({ ...this.fontFamilies, [role]: list })
-    this.write(() => this.host.set(FONT_FAMILY_FIELDS[role], list))
+    const patch: Partial<ThemeSettings> = {}
+    patch[FONT_FAMILY_FIELDS[role]] = list
+    this.persistLocal(patch)
     this.publish()
   }
 
-  /** Queue one settings write, then adopt the durable section once no own write remains. */
-  private write(operation: () => Promise<boolean>): void {
-    this.pendingWrites += 1
-    void operation().finally(() => {
-      this.pendingWrites -= 1
-      this.adopt()
-    })
+  /** Merge one override field into this browser's stored entry and persist it. */
+  private persistLocal(patch: Partial<ThemeSettings>): void {
+    this.local = { ...this.local, ...patch }
+    writeLocalTheme(this.local)
   }
 
-  /** Adopt the scope's accepted durable preference without writing it back. */
+  /**
+   * Adopt this browser's stored override, falling back per field to the
+   * deployment scope's accepted section, without writing anything back.
+   */
   private adopt(): void {
-    if (this.pendingWrites > 0) return
     const section = this.host.getSnapshot().value
-    if (section === undefined) return
-    const fontFamilies = durableFontFamilies(section)
-    const fontSizes = sectionFontSizes(section)
-    if (this.preference === section.preference
+    if (section === undefined && this.local === undefined) return
+    const local = this.local
+    const preference = local?.preference ?? section?.preference ?? this.preference
+    const fontSizes = Object.freeze({
+      text: local?.fontSize ?? section?.fontSize ?? this.fontSizes.text,
+      code: local?.codeFontSize ?? section?.codeFontSize ?? this.fontSizes.code,
+      terminal: local?.terminalFontSize ?? section?.terminalFontSize ?? this.fontSizes.terminal,
+    })
+    const fontFamilies = Object.freeze({
+      text: normalizeFontFamily(local?.textFontFamily ?? section?.textFontFamily ?? this.fontFamilies.text),
+      code: normalizeFontFamily(local?.codeFontFamily ?? section?.codeFontFamily ?? this.fontFamilies.code),
+      terminal: normalizeFontFamily(local?.terminalFontFamily ?? section?.terminalFontFamily ?? this.fontFamilies.terminal),
+    })
+    if (this.preference === preference
       && FONT_ROLES.every(role => this.fontSizes[role] === fontSizes[role] && this.fontFamilies[role] === fontFamilies[role])) return
-    this.preference = section.preference
+    this.preference = preference
     this.fontSizes = fontSizes
     this.fontFamilies = fontFamilies
     this.publish()
@@ -468,13 +486,47 @@ function bootstrapFontFamilies(): FontFamilies {
   })
 }
 
-/** Normalized font lists from one accepted settings section (hand-edited documents may hold raw input). */
-function durableFontFamilies(section: ThemeSettings): FontFamilies {
-  return Object.freeze({
-    text: normalizeFontFamily(section.textFontFamily),
-    code: normalizeFontFamily(section.codeFontFamily),
-    terminal: normalizeFontFamily(section.terminalFontFamily),
-  })
+/**
+ * Read this browser's stored appearance override. An absent, unreadable, or
+ * malformed entry leaves the deployment section in charge; a partial entry
+ * overrides only the fields it carries.
+ * @returns the validated override, or undefined when this browser stored none.
+ */
+function readLocalTheme(): Partial<ThemeSettings> | undefined {
+  if (typeof localStorage === 'undefined') return undefined
+  let parsed: unknown
+  try {
+    const raw = localStorage.getItem(LOCAL_THEME_STORAGE_KEY)
+    if (raw === null) return undefined
+    parsed = JSON.parse(raw)
+  } catch (_unreadable) {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const candidate = parsed as Record<string, unknown>
+  const stored: Partial<ThemeSettings> = {}
+  const preference = candidate[THEME_PREFERENCE_FIELD]
+  if (isThemePreference(preference)) stored.preference = preference
+  for (const role of FONT_ROLES) {
+    const px = candidate[FONT_SIZE_SPECS[role].field]
+    if (typeof px === 'number' && isFontSize(role, px)) stored[FONT_SIZE_SPECS[role].field] = px
+    const family = candidate[FONT_FAMILY_FIELDS[role]]
+    if (typeof family === 'string') stored[FONT_FAMILY_FIELDS[role]] = normalizeFontFamily(family)
+  }
+  return Object.keys(stored).length === 0 ? undefined : stored
+}
+
+/**
+ * Store this browser's appearance override. A refused write (private mode, full
+ * quota) leaves the value in memory only, so the page still honors it.
+ */
+function writeLocalTheme(section: Partial<ThemeSettings>): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, JSON.stringify(section))
+  } catch (_storageRefused) {
+    // The in-memory value already applies to this page.
+  }
 }
 
 /**

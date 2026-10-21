@@ -102,9 +102,16 @@ export interface Config {
    * server on this machine; any other literal serves the network that address
    * belongs to, over plain HTTP unless `tls` is set. The unspecified address —
    * IPv4 any, IPv6 any, and the IPv4-mapped forms of IPv4 any — is rejected at
-   * load: it would expose the port on every interface at once.
+   * load unless {@link allowWildcard} explicitly opts into binding every
+   * interface at once.
    */
   host: string
+  /**
+   * Permit an unspecified (wildcard) {@link host}. Without it a wildcard bind is
+   * rejected at load: it exposes the port on every interface at once, and the
+   * deployment must name that exposure deliberately. @default false
+   */
+  allowWildcard?: boolean
   /** Listen port; zero requests an OS-assigned port. */
   port: number
   /**
@@ -357,13 +364,10 @@ async function writeResponse(res: ServerResponse, response: Response, head: bool
 export class WebServer extends Service {
   static Config: z<Config> = z.object({
     host: z.transform(z.string(), (value) => {
-      const parsed = parseIpLiteral(value)
-      if (parsed === undefined) throw notLiteralError(value)
-      if (isWildcardAddress(parsed)) {
-        throw new Error(`webserver: host ${JSON.stringify(value)} is an unspecified (wildcard) address, which is not supported: binding every interface would expose remote code execution to the network; bind one concrete IPv4 or IPv6 address of a local interface instead`)
-      }
+      if (parseIpLiteral(value) === undefined) throw notLiteralError(value)
       return value
     }).required(),
+    allowWildcard: z.boolean().default(false),
     port: z.natural().max(65535).required(),
     // An omitted object must not become `{}` and fail the required pair fields.
     tls: z.object({
@@ -396,6 +400,9 @@ export class WebServer extends Service {
 
   constructor(ctx: Context, private config: Config) {
     super(ctx, 'webServer')
+    if (isWildcardHost(config.host) && config.allowWildcard !== true) {
+      throw new Error(`webserver: host ${JSON.stringify(config.host)} is an unspecified (wildcard) address, which is not supported: binding every interface would expose remote code execution to the network; bind one concrete IPv4 or IPv6 address of a local interface instead, or pass --allow-lan for dsh web`)
+    }
     const resolved = config as ResolvedConfig
     // Schemastery passes an explicit `tls: null` through; only a real object serves TLS.
     this.tlsConfig = resolved.tls ?? undefined

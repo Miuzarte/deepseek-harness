@@ -70,6 +70,12 @@ export interface Config {
    * Absent or YAML `null` advertises the bind-address URL.
    */
   publicUrl?: string
+  /**
+   * LAN IPv4 addresses printed as additional authenticated URLs when the
+   * listener binds a wildcard address. Populated from `--allow-lan`; the
+   * browser-trust fence receives the same list from `webStartup.trustedHosts`.
+   */
+  lanHosts?: string[]
 }
 
 export const Config: z<Config> = z.object({
@@ -77,6 +83,7 @@ export const Config: z<Config> = z.object({
   printUrl: z.boolean().default(true),
   surfaceContext: z.boolean().default(true),
   publicUrl: z.transform(z.string(), value => parsePublicUrl(value).href),
+  lanHosts: z.array(z.string()).default([]),
 })
 
 /** Environment variable naming the advertised URL of this Web GUI. */
@@ -229,6 +236,15 @@ export function apply(ctx: Context, config: Config): void {
         ANNOUNCED_ROOTS.add(connectionCtx.root)
         if (config.printUrl) {
           console.log(`dsh web: ${authenticatedUrl}`)
+          // A wildcard bind's own origin is not a destination another device
+          // can open, so name each LAN address this deployment admitted.
+          if (publicUrl === undefined) {
+            for (const lanHost of config.lanHosts ?? []) {
+              const lanUrl = new URL(webUrl)
+              lanUrl.hostname = lanHost
+              console.log(`dsh web (LAN): ${connectionCtx.connection.authenticatedUrl(lanUrl.href)}`)
+            }
+          }
         }
         if (handoffBrowser) {
           console.log('dsh web: opening the default browser; pass --no-open to disable')

@@ -262,13 +262,19 @@ describe('real Loader composition', () => {
       '::ffff:0.0.0.0', '::ffff:0:0', '::ffff:0000:0000', '0:0:0:0:0:ffff:0:0',
       '0:0:0:0:0:ffff:0.0.0.0', '::ffff:0.0.0.0%eth0',
     ]) {
-      expect(() => HttpServer.Config({ host, port: 0 })).toThrow(
+      expect(() => new HttpServer(new Context(), HttpServer.Config({ host, port: 0 }))).toThrow(
         /is an unspecified \(wildcard\) address, which is not supported/,
       )
     }
     for (const host of ['localhost', 'example.com', '*', '[::]', '[fd00::1]', '10.1.2.3/8']) {
       expect(() => HttpServer.Config({ host, port: 0 }))
         .toThrow(/is not a concrete IPv4 or IPv6 address literal/)
+    }
+  })
+
+  it('accepts a wildcard bind only when the deployment opts in', () => {
+    for (const host of ['0.0.0.0', '::', '::ffff:0.0.0.0']) {
+      expect(() => new HttpServer(new Context(), HttpServer.Config({ host, port: 0, allowWildcard: true }))).not.toThrow()
     }
   })
 
@@ -334,6 +340,7 @@ describe('real Loader composition', () => {
   it('applies gzip only to eligible socket-backed HTTP responses', { timeout: 60_000 }, async () => {
     expect(HttpServer.Config({ host: '127.0.0.1', port: 0 })).toEqual({
       host: '127.0.0.1',
+      allowWildcard: false,
       port: 0,
       compression: 'none',
       compressionLevel: 1,
@@ -886,6 +893,7 @@ describe('real Loader composition', () => {
     const tls = { certFile: fixture.certFile, keyFile: fixture.keyFile }
     expect(HttpServer.Config({ host: '127.0.0.1', port: 0, tls })).toEqual({
       host: '127.0.0.1',
+      allowWildcard: false,
       port: 0,
       tls,
       compression: 'none',

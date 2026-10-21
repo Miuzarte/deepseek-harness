@@ -62,6 +62,31 @@ describe('LocalBashExecutor.run', () => {
     expect(result.timeoutMs).toBe(5_000)
   })
 
+  it('runs the deployment-provided DSH_BASH executable', async () => {
+    const shim = join(spillDir, 'bash-shim.sh')
+    writeFileSync(shim, '#!/bin/sh\nprintf "shim:%s\\n" "$2"\n', { mode: 0o755 })
+    process.env.DSH_BASH = shim
+    try {
+      const { bash } = await setup()
+      const result = await run(bash, bash.resolve({ command: 'ignored' }))
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.text).toBe('shim:ignored\n')
+    } finally {
+      delete process.env.DSH_BASH
+    }
+  })
+
+  it('treats an empty DSH_BASH as unset', async () => {
+    process.env.DSH_BASH = ''
+    try {
+      const { bash } = await setup()
+      const result = await run(bash, bash.resolve({ command: 'echo hi' }))
+      expect(result.stdout.text).toBe('hi\n')
+    } finally {
+      delete process.env.DSH_BASH
+    }
+  })
+
   it('uses config cwd, overridable per call', async () => {
     const { bash } = await setup({ cwd: '/tmp' })
     const fromConfig = await run(bash, bash.resolve({ command: 'pwd' }))

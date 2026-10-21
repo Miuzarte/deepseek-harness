@@ -419,24 +419,11 @@ describe('web e2e: settings modal and General preferences', () => {
   }, 60_000)
 
   async function selectTheme(cube: Locator, preference: 'light' | 'dark' | 'system'): Promise<void> {
-    // Optimistic UI and a file value from an earlier gesture do not prove this write finished.
-    const [response] = await Promise.all([
-      page.waitForResponse((candidate) => {
-        if (candidate.request().method() !== 'POST'
-          || new URL(candidate.url()).pathname !== '/api/settings/mutate') return false
-        const { payload: { args } } = candidate.request().postDataJSON() as {
-          payload: { args: { ns: string; ops: { op: string; path: string[]; value?: unknown }[] } }
-        }
-        return args.ns === 'ui-theme' && args.ops.some(op => op.op === 'set'
-          && op.path.length === 1 && op.path[0] === 'preference' && op.value === preference)
-      }, { timeout: 5_000 }),
-      cube.click(),
-    ])
-    expect(response.ok()).toBe(true)
-    const outcome: unknown = await response.json()
-    expect(outcome, JSON.stringify(outcome)).toMatchObject({
-      result: { ok: true, value: { ns: 'ui-theme', value: { preference } } },
-    })
+    // Appearance is browser-local: the gesture writes this browser's storage and
+    // never reaches the Host settings API.
+    await cube.click()
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('dsh.theme')), { timeout: 5_000 })
+      .toContain(`"preference":"${preference}"`)
   }
 
   it('uses the persisted dark preference while plugins are still loading', async () => {
@@ -447,8 +434,8 @@ describe('web e2e: settings modal and General preferences', () => {
     const darkCube = initialDialog.getByRole('button', { name: '深色' })
     await selectTheme(darkCube, 'dark')
     await expect.poll(() => darkCube.getAttribute('aria-pressed'), { timeout: 5_000 }).toBe('true')
-    await expect.poll(async () => readFile(join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml'), 'utf8'), { timeout: 5_000 })
-      .toContain('preference: dark')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('dsh.theme')), { timeout: 5_000 })
+      .toContain('"preference":"dark"')
     await page.keyboard.press('Escape')
 
     // Hold the real application batch so the shell-owned loading page remains observable.
@@ -508,8 +495,8 @@ describe('web e2e: settings modal and General preferences', () => {
     interface ThemeState {
       attr: boolean
       background: string
-      /** Pre-migration localStorage key; the Host-backed world never writes it. */
-      legacy: string | null
+      /** This browser's stored appearance override; the Host document never holds it. */
+      stored: string | null
       themeColor: string | null
       themeColorCount: number
       faviconPaths: string[]
@@ -523,7 +510,7 @@ describe('web e2e: settings modal and General preferences', () => {
         faviconPaths: icons.filter(icon => matchMedia(icon.media).matches).map(icon => new URL(icon.href).pathname),
         attr: document.body.hasAttribute('data-ds-dark-theme'),
         background: computed.backgroundColor,
-        legacy: localStorage.getItem('dsh.theme'),
+        stored: localStorage.getItem('dsh.theme'),
         themeColor: metas[0]?.content ?? null,
         themeColorCount: metas.length,
         token: computed.getPropertyValue('--dsw-alias-bg-base').trim(),
@@ -539,6 +526,7 @@ describe('web e2e: settings modal and General preferences', () => {
     await page.emulateMedia({ colorScheme: 'light' })
     const light = await readState()
     expect(light.attr).toBe(false)
+    expect(light.stored).toBeNull()
     expect(light.faviconPaths).toEqual(['/favicon.svg'])
     expectThemeColorSynchronized(light)
 
@@ -548,20 +536,20 @@ describe('web e2e: settings modal and General preferences', () => {
     const darkCube = dialog.getByRole('button', { name: '深色' })
     expect(await darkCube.getAttribute('aria-pressed')).toBe('false')
     await selectTheme(darkCube, 'dark')
-    // The full cascade: pressed state, Host-backed preference, body attribute,
-    // alias token flip — all from one real user gesture.
+    // The full cascade: pressed state, browser-stored preference, body
+    // attribute, alias token flip — all from one real user gesture.
     await expect.poll(() => darkCube.getAttribute('aria-pressed'), { timeout: 5_000 }).toBe('true')
     const dark = await readState()
     expect(dark.attr).toBe(true)
     expect(dark.faviconPaths).toEqual(['/favicon.svg'])
-    expect(dark.legacy).toBeNull()
+    expect(dark.stored).toContain('"preference":"dark"')
     expect(dark.token).not.toBe(light.token)
     expectThemeColorSynchronized(dark)
-    await expect.poll(async () => readFile(join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml'), 'utf8'), { timeout: 5_000 })
-      .toContain('preference: dark')
+    await expect.poll(async () => readFile(join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml'), 'utf8').catch(() => ''))
+      .not.toContain('preference: dark')
     await page.keyboard.press('Escape')
 
-    // Reload: the preference survives the background Host read + presenter update.
+    // Reload: the boot script reads the stored preference before first paint.
     const warningStart = tripwire.warnings.length
     await page.reload({ waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
@@ -569,13 +557,13 @@ describe('web e2e: settings modal and General preferences', () => {
     await page.emulateMedia({ colorScheme: 'light' })
     await expect.poll(async () => (await readState()).attr, { timeout: 5_000 }).toBe(true)
     const reloaded = await readState()
-    expect(reloaded.legacy).toBeNull()
+    expect(reloaded.stored).toContain('"preference":"dark"')
     expect(reloaded.faviconPaths).toEqual(['/favicon.svg'])
     expectThemeColorSynchronized(reloaded)
 
-    // A second live Host binds another ephemeral port but shares the same
-    // user-settings home. Its fresh origin has no theme localStorage and still
-    // converges to dark before the settings dialog opens.
+    // A second live Host binds another ephemeral port, so it is a different
+    // origin with its own empty storage: appearance is per browser origin, and
+    // this page starts from the deployment default instead of inheriting dark.
     const second = await launchWebScaffold({ developerTools: false, harnessHome: scaffold.harnessHome })
     const secondPage = await browser.newPage({ viewport: { width: 1680, height: 1000 }, locale: ZH_BROWSER_LOCALE })
     const secondTripwire = watchConsole(secondPage)
@@ -584,9 +572,9 @@ describe('web e2e: settings modal and General preferences', () => {
       await secondPage.emulateMedia({ colorScheme: 'light' })
       await secondPage.goto(second.authenticatedUrl, { waitUntil: 'load' })
       await secondPage.waitForSelector('[class*="frame"]', { timeout: 30_000 })
-      await expect.poll(async () => (await readState(secondPage)).attr, { timeout: 5_000 }).toBe(true)
+      await expect.poll(async () => (await readState(secondPage)).attr, { timeout: 5_000 }).toBe(false)
       const secondState = await readState(secondPage)
-      expect(secondState.legacy).toBeNull()
+      expect(secondState.stored).toBeNull()
       expectThemeColorSynchronized(secondState)
       expect(secondTripwire.pageErrors).toEqual([])
       expect(secondTripwire.warnings).toEqual([])
@@ -638,21 +626,11 @@ describe('web e2e: settings modal and General preferences', () => {
       probe.remove()
       return size
     })
-    // The displayed value is optimistic; wait for the write before the next step.
+    // The displayed value is optimistic; wait for this browser's write before the next step.
     const stepFontSize = async (button: Locator, px: number): Promise<void> => {
-      const [response] = await Promise.all([
-        page.waitForResponse((reply) => {
-          if (new URL(reply.url()).pathname !== '/api/settings/mutate' || reply.request().method() !== 'POST') return false
-          const request = reply.request().postDataJSON() as { payload: { args: { ns: string } } }
-          return request.payload.args.ns === 'ui-theme'
-        }),
-        button.click(),
-      ])
-      expect(await response.finished()).toBeNull()
-      const envelope = await response.json() as { result: { ok: boolean } }
-      expect(envelope.result.ok).toBe(true)
-      await expect.poll(async () => readFile(join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml'), 'utf8'), { timeout: 5_000 })
-        .toContain(`fontSize: ${px}`)
+      await button.click()
+      await expect.poll(() => page.evaluate(() => localStorage.getItem('dsh.theme')), { timeout: 5_000 })
+        .toContain(`"fontSize":${px}`)
       await page.getByRole('dialog', { name: '设置' }).getByText(String(px), { exact: true }).waitFor({ timeout: 5_000 })
       await expect.poll(readFontSize, { timeout: 5_000 }).toBe(`${px}px`)
     }
@@ -672,9 +650,9 @@ describe('web e2e: settings modal and General preferences', () => {
     await expect.poll(readSecondaryFontSize, { timeout: 5_000 }).toBe('14px')
     await page.keyboard.press('Escape')
 
-    // Reload: the boot script embeds the durable size and ThemeRuntime seeds
-    // its initial snapshot from the boot-written body variable, so activation
-    // never flashes the default while the settings read is in flight.
+    // Reload: the boot script reads this browser's stored size and ThemeRuntime
+    // seeds its initial snapshot from the boot-written body variable, so
+    // activation never flashes the default.
     const warningStart = tripwire.warnings.length
     await page.reload({ waitUntil: 'load' })
     acknowledgeReloadConnectionLoss(tripwire, warningStart)
@@ -717,7 +695,9 @@ describe('web e2e: settings modal and General preferences', () => {
         codeStack: probe('var(--dsh-font-family-code-default)'),
       }
     })
-    const patchFile = join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml')
+    const storedTheme = async (): Promise<Record<string, unknown> | null> => await page.evaluate(
+      () => JSON.parse(localStorage.getItem('dsh.theme') ?? 'null') as Record<string, unknown> | null,
+    )
     const commit = async (name: string, value: string): Promise<void> => {
       const field = page.getByRole('dialog', { name: '设置' }).getByRole('textbox', { name, exact: true })
       await field.fill(value)
@@ -739,7 +719,7 @@ describe('web e2e: settings modal and General preferences', () => {
     await openSettings(page, 'zh')
     await expandFonts()
     await commit('代码字体', 'Courier New, monospace')
-    await expect.poll(async () => readFile(patchFile, 'utf8'), { timeout: 5_000 }).toContain('codeFontFamily')
+    await expect.poll(storedTheme, { timeout: 5_000 }).toMatchObject({ codeFontFamily: '"Courier New", monospace' })
     await expect.poll(readFonts, { timeout: 5_000 }).toEqual({ ...defaults, code: `"Courier New", monospace, ${codeStack}` })
     // The code size moves the code-block token independently of the content size.
     const readCodeSize = async (): Promise<string> => await page.evaluate(() => {
@@ -754,11 +734,11 @@ describe('web e2e: settings modal and General preferences', () => {
     const codeSize = page.getByRole('dialog', { name: '设置' }).getByRole('button', { name: '增大代码字号', exact: true })
     await codeSize.click()
     await expect.poll(readCodeSize, { timeout: 5_000 }).toBe('12px')
-    await expect.poll(async () => readFile(patchFile, 'utf8'), { timeout: 5_000 }).toContain('codeFontSize: 12')
+    await expect.poll(storedTheme, { timeout: 5_000 }).toMatchObject({ codeFontSize: 12 })
     await commit('正文字体', 'Georgia')
     await expect.poll(readFonts, { timeout: 5_000 }).toEqual({ ...defaults, text: `Georgia, ${textStack}`, code: `"Courier New", monospace, ${codeStack}` })
-    // The snapshot updates optimistically; reload only after the Host has persisted both lists.
-    await expect.poll(async () => readFile(patchFile, 'utf8'), { timeout: 5_000 }).toContain('Georgia')
+    // The snapshot updates optimistically; reload only after this browser stored both lists.
+    await expect.poll(storedTheme, { timeout: 5_000 }).toMatchObject({ textFontFamily: '"Georgia"' })
     await page.keyboard.press('Escape')
 
     const warningStart = tripwire.warnings.length
@@ -778,8 +758,7 @@ describe('web e2e: settings modal and General preferences', () => {
     await reloaded.getByRole('button', { name: '减小代码字号', exact: true }).click()
     await expect.poll(readFonts, { timeout: 5_000 }).toEqual(defaults)
     await expect.poll(readCodeSize, { timeout: 5_000 }).toBe('11px')
-    await expect.poll(async () => readFile(patchFile, 'utf8'), { timeout: 5_000 }).toContain('codeFontSize: 11')
-    await expect.poll(async () => readFile(patchFile, 'utf8'), { timeout: 5_000 }).not.toContain('Courier New')
+    await expect.poll(storedTheme, { timeout: 5_000 }).toMatchObject({ codeFontSize: 11, textFontFamily: '', codeFontFamily: '' })
     await page.keyboard.press('Escape')
     expect(tripwire.pageErrors).toEqual([])
   }, 90_000)

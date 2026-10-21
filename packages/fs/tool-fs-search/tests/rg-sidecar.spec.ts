@@ -7,6 +7,7 @@ const { dependency, existsSync } = vi.hoisted(() => ({
 }))
 const originalPlatform = process.platform
 const originalExecPath = process.execPath
+const originalRgPath = process.env.DSH_RG_PATH
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
@@ -19,6 +20,8 @@ beforeEach(() => {
   vi.resetModules()
   existsSync.mockReset()
   dependency.rgPath = '/node_modules/@vscode/ripgrep/bin/rg'
+  if (originalRgPath === undefined) delete process.env.DSH_RG_PATH
+  else process.env.DSH_RG_PATH = originalRgPath
   Reflect.deleteProperty(process, 'pkg')
   Reflect.deleteProperty(process.versions, 'electron')
   Reflect.defineProperty(process, 'platform', { configurable: true, enumerable: true, value: originalPlatform })
@@ -33,6 +36,24 @@ afterEach(() => {
 })
 
 describe('ripgrep resolution', () => {
+  it('uses a deployment-provided DSH_RG_PATH before any packaged binary', async () => {
+    process.env.DSH_RG_PATH = '/data/app/liblwrg.so'
+    Reflect.defineProperty(process, 'pkg', { configurable: true, value: {} })
+    existsSync.mockReturnValue(true)
+    const { resolveRgPath } = await import('@deepseek-ai/dsh-tool-fs-search')
+
+    await expect(resolveRgPath()).resolves.toBe('/data/app/liblwrg.so')
+    expect(existsSync).not.toHaveBeenCalled()
+  })
+
+  it('ignores an empty DSH_RG_PATH and keeps the packaged lookup', async () => {
+    process.env.DSH_RG_PATH = ''
+    existsSync.mockReturnValue(true)
+    const { resolveRgPath } = await import('@deepseek-ai/dsh-tool-fs-search')
+
+    await expect(resolveRgPath()).resolves.toBe(dependency.rgPath)
+  })
+
   it('uses the native sidecar beside the current executable', async () => {
     Reflect.defineProperty(process, 'pkg', { configurable: true, value: {} })
     Reflect.defineProperty(process, 'platform', { configurable: true, enumerable: true, value: 'linux' })

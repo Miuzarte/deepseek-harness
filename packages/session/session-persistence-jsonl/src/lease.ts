@@ -52,6 +52,18 @@ function isLockContention(error: unknown): boolean {
 }
 
 /**
+ * Whether the platform has no flock binding at all. The browser worker stub and
+ * Android's native-package fallback both report this code; a single-process
+ * host relies on the in-process write claim instead, and the held descriptor
+ * still releases on close.
+ * @param error - rejection from the native flock entry.
+ * @returns true when the platform cannot perform the syscall.
+ */
+function isLockUnavailable(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ERR_FLOCK_UNSUPPORTED_PLATFORM'
+}
+
+/**
  * One held write lock. Constructed only by {@link SessionWriteLease.acquire};
  * `release` closes the descriptor or handle, which is what releases the lock.
  */
@@ -94,6 +106,7 @@ export class SessionWriteLease {
           await tryLockExclusive(handle.fd)
         } catch (error: unknown) {
           if (isLockContention(error)) throw new SessionAlreadyOwnedError(id)
+          if (isLockUnavailable(error)) return new SessionWriteLease({ kind: 'posix', handle })
           throw error
         }
         const held = await handle.stat({ bigint: true })
