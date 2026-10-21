@@ -150,6 +150,8 @@ describe('web command-line provider', () => {
         { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', mac: '00:00:00:00:00:01', internal: false, cidr: 'fe80::1/64', scopeid: 2 },
       ],
       wlan0: [{ address: '192.168.1.5', netmask: '255.255.255.0', family: 'IPv4', mac: '00:00:00:00:00:02', internal: false, cidr: '192.168.1.5/24' }],
+      docker0: [{ address: '172.17.0.1', netmask: '255.255.0.0', family: 'IPv4', mac: '02:42:ac:11:00:02', internal: false, cidr: '172.17.0.1/16' }],
+      'br-cb045e6ea068': [{ address: '172.25.0.1', netmask: '255.255.0.0', family: 'IPv4', mac: '02:42:ac:19:00:02', internal: false, cidr: '172.25.0.1/16' }],
     })).toEqual(['192.168.1.5'])
   })
 

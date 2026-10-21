@@ -63,13 +63,20 @@ interface WebOptions {
 }
 
 /**
- * Collect this machine's non-loopback IPv4 addresses.
+ * Interface names a container runtime or VM host owns rather than the physical
+ * or VPN link a remote browser reaches. Docker bridge names carry a 12-hex id.
+ */
+const VIRTUAL_INTERFACE = /^(?:docker|veth|virbr|br-[0-9a-f]{12})/u
+
+/**
+ * Collect this machine's reachable non-loopback IPv4 addresses.
  * @param interfaces - OS interface table, injectable for tests.
  * @returns unique addresses in interface order.
  */
 export function lanIPv4Addresses(interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()): string[] {
   const hosts = new Set<string>()
-  for (const entries of Object.values(interfaces)) {
+  for (const [name, entries] of Object.entries(interfaces)) {
+    if (VIRTUAL_INTERFACE.test(name)) continue
     for (const entry of entries ?? []) {
       if (entry.family === 'IPv4' && !entry.internal) hosts.add(entry.address)
     }
