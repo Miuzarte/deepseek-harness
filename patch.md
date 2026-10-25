@@ -103,6 +103,21 @@ git diff upstream/master..master --stat
 
 **上游新增的 workflow 文件会跟着 sync 落到 fork 并以 enabled 状态出现**：disable 是仓库状态、绑定 workflow ID，上游新加文件就是新 ID，得再禁一次。同步后检查一遍：`gh workflow list --all -R Miuzarte/deepseek-harness`，除 `sync-upstream` 外都应是 `disabled_manually`；有漏的就 `gh workflow disable <name> -R Miuzarte/deepseek-harness`。
 
+## 8. Windows 桌面端改用 Git Bash（纯配置，不在仓库里）
+
+**问题**：Windows 上 shipped profile 挂的是 `pwsh-sandbox` + `tool-pwsh`。Git Bash 的 MSYS 运行时在受限令牌沙箱里起不来（`couldn't create signal pipe` → `0xC0000142`），所以 bash 只在 `danger-full-access` 下可用——切到 `workspace-write` / `read-only` 时 shell 工具和持久终端会一起失效。
+
+**做法**：全部落在 `$DSH_HOME`，不进仓库，因此不受上面的 rebase / 同步流程影响。
+
+| 文件 | 改动 |
+| :-- | :-- |
+| `profiles/desktop/cordis.patch.yml` | `bash-sandbox` 开、`pwsh-sandbox` 关；`preset-standard` 整段覆盖（`tool-bash` 开、`tool-pwsh` 关）；`preset-ptc` / `preset-cordis` 停用；`optional-terminal-bash` 的 `shellPath` 指向 Git Bash |
+| `cordis.patch.yml` + `plugins/dsh-shell-executable/` | 插件把 Git 的 `bin` 插到宿主 `PATH` 最前，并导出 `DSH_BASH` |
+
+**为什么是 PATH 而不是 `DSH_BASH`**：从上游 release 装的桌面端，其 `dsh-bash-local` 不含 §4 的补丁（`grep -c DSH_BASH app.asar` → 0），变量没人读。而 `scrubbedParentEnv()` 每次 spawn 重新读 `process.env`、且只剥 `DSH_*` 与凭据形状的变量，`PATH` 保留——所以改“`bash` 这个名字解析到谁”对任何构建都成立。改用源码构建后 §4 生效，两条路指向同一文件，PATH 插件可以留着也可以删。
+
+**代价**：`preset-standard` 那份拷贝在上游改动 preset 清单后要手动同步一次；其余是配置，没有代码要维护。
+
 ## 服务器 / 新机器上同步
 
 ```sh
