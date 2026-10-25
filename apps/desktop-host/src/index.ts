@@ -23,12 +23,29 @@ async function main(): Promise<void> {
   const installAnchor = join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
   const profile = loadProfileDirectory('dsh', projectDir, installAnchor)
   reportSkippedBundles('dsh', profile)
+  // One listener covers loopback, the LAN, and a VPN at once only when it binds
+  // every interface: the web app then requires --allow-lan and admits each
+  // non-loopback IPv4 to the browser-trust fence. A concrete interface bind has
+  // no loopback route, and the shell window below is a `dsh-app://` document
+  // whose API calls to a non-loopback authority are cross-origin, which the
+  // fence refuses.
+  const bindHost = process.env.DSH_DESKTOP_HOST ?? '127.0.0.1'
+  const loopbackBind = bindHost.startsWith('127.') || bindHost === 'localhost' || bindHost === '::1'
+  const wildcardBind = bindHost === '0.0.0.0' || bindHost === '::'
+  if (!loopbackBind && !wildcardBind) {
+    throw new Error(`desktop host: DSH_DESKTOP_HOST=${bindHost} cannot serve the desktop window, whose dsh-app origin the browser-trust fence refuses on a non-loopback authority; use 0.0.0.0 to serve loopback, the LAN, and a VPN together`)
+  }
   const application = runProfile({
     environment: loadLayeredEnv('dsh'),
     profile: 'desktop',
     resolvedProfile: { profile, installAnchor },
     patchFiles: [],
-    args: ['--no-open', '--host', '127.0.0.1', '--port', '0'],
+    args: [
+      '--no-open',
+      '--host', bindHost,
+      '--port', process.env.DSH_DESKTOP_PORT ?? '0',
+      ...wildcardBind ? ['--allow-lan'] : [],
+    ],
     ...(process.argv[5] === undefined ? {} : {
       packageManager: {
         command: process.execPath,
@@ -133,6 +150,9 @@ async function main(): Promise<void> {
   installPlatformSessionPublisher(ctx, (session) => {
     if (process.connected) process.send?.({ type: 'platform-session', session })
   })
+  // The window is one frontend of this Host and stays on loopback, even when the
+  // listener serves every interface: `getOrigin()` would report the wildcard
+  // bind, which no client can open.
   const url = ctx.connection.authenticatedUrl(`${ctx.webServer.protocol}//127.0.0.1:${String(ctx.webServer.port)}`)
   if (process.connected) process.send?.({ type: 'ready', url, injections: ctx.webServer.collectIndexInjections(ctx.connection.browserPeer) }, (error) => { if (error !== null) console.error(error) })
 }
