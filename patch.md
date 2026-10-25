@@ -132,13 +132,21 @@ git diff upstream/master..master --stat
 | 通配绑定 | `DSH_DESKTOP_HOST` 是通配地址时自动追加 `--allow-lan`，一个监听器同时覆盖回环、LAN 与 VPN |
 | 窗口 URL | 保持回环 `//127.0.0.1:<端口>`；通配监听同样应答回环，具体网卡地址则在启动时直接报错退出 |
 
-用法（回环给桌面窗口，LAN 与 ZeroTier 用浏览器打开）：
+用法（回环给桌面窗口，LAN 与 ZeroTier 用浏览器打开）。**持久化写在 `%USERPROFILE%\.dsh\desktop.yml`**，不用每次开终端：
+
+```yaml
+# %USERPROFILE%\.dsh\desktop.yml
+bind: 0.0.0.0
+port: 3080
+```
 
 ```powershell
-$env:DSH_DESKTOP_HOST='0.0.0.0'
-$env:DSH_DESKTOP_PORT='3080'
 & 'B:\Git\deepseek-harness\apps\desktop\.desktop-build\targets\win-x64\unsigned-artifacts\win-unpacked\DeepSeek Harness.exe'
 ```
+
+读取顺序是环境变量 → `desktop.yml` → 默认值（`127.0.0.1` / 随机端口），所以临时覆盖仍然可以 `$env:DSH_DESKTOP_HOST=…` 再启动。文件里出现未知键、或 `port` 不是 0–65535 的整数，会在启动时直接报错，不会静默回退。
+
+**为什么需要单独一个文件**：`.env` 这条路走不通——harness 把 `DSH_` 前缀列为引导保留名，任何 `.env` 里出现 `DSH_*` 都会被拒绝（防止克隆来的项目劫持启动环境）。而这两个值要在 profile 组合之前就读到，所以放在 home 目录下的 `desktop.yml`。
 
 宿主启动时打印 `dsh web: …`（回环）和每个网卡一条 `dsh web (LAN): http://<ip>:3080/?token=…`；首次访问换 cookie，之后干净 URL 可长期收藏（secret 持久化在 credentials 里）。
 
