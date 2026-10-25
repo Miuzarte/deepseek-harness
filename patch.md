@@ -116,7 +116,39 @@ git diff upstream/master..master --stat
 
 **为什么是 PATH 而不是 `DSH_BASH`**：从上游 release 装的桌面端，其 `dsh-bash-local` 不含 §4 的补丁（`grep -c DSH_BASH app.asar` → 0），变量没人读。而 `scrubbedParentEnv()` 每次 spawn 重新读 `process.env`、且只剥 `DSH_*` 与凭据形状的变量，`PATH` 保留——所以改“`bash` 这个名字解析到谁”对任何构建都成立。改用源码构建后 §4 生效，两条路指向同一文件，PATH 插件可以留着也可以删。
 
-**代价**：`preset-standard` 那份拷贝在上游改动 preset 清单后要手动同步一次；其余是配置，没有代码要维护。
+**代价**：`preset-standard` 那份拷贝和 app 版本强绑定。
+
+踩过一次真事故：拷贝取自安装的 rc.2，而跑的是 rc.3 构建。rc.2 的 preset 比 rc.3 多一行 `tool-subagent-list-agents`（该子路径在 rc.3 已删除），于是 agent preset 导入失败——新会话只写出一个 175 字节的会话头，界面显示「会话不可用」、设置一直转圈，而旧会话（复用旧 revision）照常可用，很容易误判成启动器坏了。换版本时用当前构建的 `app.asar` 重新抽一次，判据是行数：rc.2 33 行、rc.3 32 行。
+
+## 9. 桌面端宿主可绑定全部网卡（同一实例多前端）
+
+**问题**：桌面端是「Electron 外壳 + 一个 host 进程」，窗口只是这个 host 的一个前端，托盘驻留也属于外壳。但 `apps/desktop-host/src/index.ts` 把绑定写死成 `--host 127.0.0.1 --port 0`，于是同一个实例无法从别的设备（家庭 LAN / ZeroTier）接入，端口还每次随机。
+
+**做法**：三处改动，默认行为逐字不变。
+
+| 位置 | 改动 |
+| :-- | :-- |
+| 启动参数 | `--host` / `--port` 改读 `DSH_DESKTOP_HOST` / `DSH_DESKTOP_PORT`，缺省仍是 `127.0.0.1` / `0` |
+| 通配绑定 | `DSH_DESKTOP_HOST` 是通配地址时自动追加 `--allow-lan`，一个监听器同时覆盖回环、LAN 与 VPN |
+| 窗口 URL | 保持回环 `//127.0.0.1:<端口>`；通配监听同样应答回环，具体网卡地址则在启动时直接报错退出 |
+
+用法（回环给桌面窗口，LAN 与 ZeroTier 用浏览器打开）：
+
+```powershell
+$env:DSH_DESKTOP_HOST='0.0.0.0'
+$env:DSH_DESKTOP_PORT='3080'
+& 'B:\Git\deepseek-harness\apps\desktop\.desktop-build\targets\win-x64\unsigned-artifacts\win-unpacked\DeepSeek Harness.exe'
+```
+
+宿主启动时打印 `dsh web: …`（回环）和每个网卡一条 `dsh web (LAN): http://<ip>:3080/?token=…`；首次访问换 cookie，之后干净 URL 可长期收藏（secret 持久化在 credentials 里）。
+
+**为什么不绑具体网卡地址**：窗口是 `dsh-app://app` 文档，它的 API 请求打到非回环地址就成了跨源请求，browser-trust 栅栏对 `Origin: dsh-app://app` 一律 403。实测同一请求：带浏览器源 → 401（通过栅栏，仅缺凭证），带桌面源 → 403。表现就是网页端正常、桌面端一直「正在加载设置」。通配绑定保留回环路由，两端才都成立，所以具体地址现在直接启动报错，而不是静默进入半可用状态。
+
+**代价**：`--allow-lan` 会把本机每个非回环 IPv4 纳入 browser-trust 并打印——这台机器上就是 `192.168.1.100` 和 `192.168.168.100`。想只暴露 ZeroTier，需在防火墙上把端口限制到该网卡。
+
+**实测**（2026-10-25，rc.3 构建）：无 token → 401；带 token → 303 换 cookie；带 cookie → 200（40 KB index）；伪造 `Host` → 拒绝；桌面源 → 403。按上面的方式启动后，桌面窗口与 `192.168.1.100` / `192.168.168.100` 两个浏览器前端**同时可用**，会话与后台任务共享同一个实例。
+
+**注意**：只对源码构建生效，打包版要重新 `pnpm run package:desktop:win:x64:unsigned`（在 PowerShell 里跑；Git Bash 的 GNU tar 会把 `B:\` 当远程主机）。打包前必须清掉 `DSH_DESKTOP_HOST` / `DSH_DESKTOP_PORT`：`prepare:dsh` 会真的启动一次桌面宿主做冒烟测试，残留的变量会让它撞上上面那条守卫而失败。桌面端有 single-instance lock，测试前先退出已安装的实例。
 
 ## 服务器 / 新机器上同步
 
