@@ -1956,9 +1956,16 @@ export interface Config {
    * server on this machine; any other literal serves the network that address
    * belongs to, over plain HTTP unless `tls` is set. The unspecified address —
    * IPv4 any, IPv6 any, and the IPv4-mapped forms of IPv4 any — is rejected at
-   * load: it would expose the port on every interface at once.
+   * load unless {@link allowWildcard} explicitly opts into binding every
+   * interface at once.
    */
   host: string
+  /**
+   * Permit an unspecified (wildcard) {@link host}. Without it a wildcard bind is
+   * rejected at load: it exposes the port on every interface at once, and the
+   * deployment must name that exposure deliberately. @default false
+   */
+  allowWildcard?: boolean
   /** Listen port; zero requests an OS-assigned port. */
   port: number
   /**
@@ -3236,7 +3243,7 @@ export type SessionLogCompressionLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
 ## `@deepseek-ai/dsh-session-persistence-jsonl`
 
-- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:95`](../packages/session/session-persistence-jsonl/src/index.ts)
+- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:96`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config for the JSONL backend's root, physical encoding, and listing concurrency. */
@@ -4980,6 +4987,12 @@ export interface Config {
    * Absent or YAML `null` advertises the bind-address URL.
    */
   publicUrl?: string
+  /**
+   * LAN IPv4 addresses printed as additional authenticated URLs when the
+   * listener binds a wildcard address. Populated from `--allow-lan`; the
+   * browser-trust fence receives the same list from `webStartup.trustedHosts`.
+   */
+  lanHosts?: string[]
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-web-app -->
