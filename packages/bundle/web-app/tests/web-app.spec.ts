@@ -68,6 +68,13 @@ function shellContributions(ctx: Context): BashContribution[] {
   return contributions
 }
 
+/** Mirror the token provider: the launch token as the sole authentication input. */
+function authenticatedUrl(baseUrl: string): string {
+  const url = new URL(baseUrl)
+  url.searchParams.set('token', 'fixture')
+  return url.href
+}
+
 describe('web-app runtime glue', () => {
   it.each([
     { mode: 'omitted', enabled: true },
@@ -187,5 +194,38 @@ describe('web-app runtime glue', () => {
 
   it('anchors the dist index on the frontend package manifest without requiring a built dist', () => {
     expect(originalResolve()).toMatch(/dist[/\\]index\.html$/)
+  })
+
+  it('prints every admitted LAN address beside a wildcard bind', () => {
+    const ctx = context('0.0.0.0')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    ctx.on('webserver/entry-url', (baseUrl, entries) => {
+      entries.push({ label: 'dsh web', url: authenticatedUrl(baseUrl), open: true })
+    })
+    apply(ctx, new Config({ openBrowser: false, printUrl: true, surfaceContext: false, lanHosts: ['192.168.1.5', '10.0.0.9'] }))
+
+    expect(log).toHaveBeenCalledWith('dsh web: http://0.0.0.0:4567/?token=fixture')
+    expect(log).toHaveBeenCalledWith('dsh web (LAN): http://192.168.1.5:4567/?token=fixture')
+    expect(log).toHaveBeenCalledWith('dsh web (LAN): http://10.0.0.9:4567/?token=fixture')
+  })
+
+  it('keeps LAN addresses out of the printout when a public URL replaces the advertised root', () => {
+    const ctx = context('0.0.0.0')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    ctx.on('webserver/entry-url', (baseUrl, entries) => {
+      entries.push({ label: 'dsh web', url: authenticatedUrl(baseUrl), open: true })
+    })
+    apply(ctx, new Config({
+      openBrowser: false,
+      printUrl: true,
+      surfaceContext: false,
+      publicUrl: 'https://app.example/ui/',
+      lanHosts: ['192.168.1.5'],
+    }))
+
+    expect(log).toHaveBeenCalledWith('dsh web: https://app.example/ui/?token=fixture')
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('dsh web (LAN):'))
   })
 })

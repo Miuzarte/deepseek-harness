@@ -1,7 +1,9 @@
 /** Launch the Desktop profile through the Web application and report its URL to Electron. */
 
+import { readFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { parse as parseYaml } from 'yaml'
 import type { PluginOperationRunId } from '@deepseek-ai/dsh-plugin-manager/diagnostic'
 import { formatFatalDiagnostic } from './fatal-diagnostic.ts'
 import { loadLayeredEnv, loadProfileDirectory, reportSkippedBundles } from '@deepseek-ai/dsh-app-boot'
@@ -9,6 +11,7 @@ import { runProfile } from '@deepseek-ai/dsh/profile-boot'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-deepseek-account'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { localDragResource } from './file-drag.ts'
 
 import { installDesktopUpdateTaskControl } from './update-tasks.ts'
@@ -17,6 +20,49 @@ import { installPlatformSessionPublisher } from './platform-session.ts'
 import { installOperationDiagnostics } from './operation-diagnostics.ts'
 import { DesktopAuthenticationEnd, receiveDesktopSecret } from './authentication.ts'
 import * as DesktopAuthentication from '@deepseek-ai/dsh-host-authentication-desktop'
+
+/** Launch parameters read before the profile boots; `DSH_*` cannot live in `.env`. */
+interface DesktopPreferences {
+  /** Listen address for the Host's web server. */
+  bind?: string
+  /** Listen port for the Host's web server. */
+  port?: number
+}
+
+/**
+ * Read `desktop.yml` beside the Harness home's `.env`. The harness refuses
+ * `DSH_*` names in `.env`, and these two choose the listener the shell boots, so
+ * they need a file the launcher reads before any profile is composed. A missing
+ * file means "launch with the defaults"; a malformed one fails the launch loudly
+ * rather than silently falling back to loopback.
+ * @returns the declared bind address and port, each absent when undeclared.
+ */
+function readDesktopPreferences(): DesktopPreferences {
+  const path = join(resolveDshHome(), 'desktop.yml')
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') return {}
+    throw new Error(`desktop host: failed to read ${path}: ${String(error)}`)
+  }
+  const parsed: unknown = text.trim() === '' ? null : parseYaml(text)
+  if (parsed === null || parsed === undefined) return {}
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`desktop host: ${path} must be a mapping with optional "bind" and "port"`)
+  }
+  const record = parsed as Record<string, unknown>
+  const unsupported = Object.keys(record).filter(key => key !== 'bind' && key !== 'port')
+  if (unsupported.length > 0) throw new Error(`desktop host: ${path} has unsupported keys: ${unsupported.join(', ')}`)
+  const { bind, port } = record
+  if (bind !== undefined && (typeof bind !== 'string' || bind.length === 0)) {
+    throw new Error(`desktop host: ${path} "bind" must be a non-empty address literal`)
+  }
+  if (port !== undefined && (typeof port !== 'number' || !Number.isInteger(port) || port < 0 || port > 65_535)) {
+    throw new Error(`desktop host: ${path} "port" must be an integer from 0 through 65535`)
+  }
+  return { ...bind === undefined ? {} : { bind }, ...port === undefined ? {} : { port } }
+}
 
 async function main(): Promise<void> {
   const runId = randomUUID() as PluginOperationRunId
@@ -45,12 +91,31 @@ async function main(): Promise<void> {
   const installAnchor = join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
   const profile = loadProfileDirectory('dsh', projectDir, installAnchor)
   reportSkippedBundles('dsh', profile)
+  // One listener covers loopback, the LAN, and a VPN at once only when it binds
+  // every interface: the web app then requires --allow-lan and admits each
+  // non-loopback IPv4 to the browser-trust fence. A concrete interface bind has
+  // no loopback route, and the shell window below is a `dsh-app://` document
+  // whose API calls to a non-loopback authority are cross-origin, which the
+  // fence refuses.
+  const preferences = readDesktopPreferences()
+  const bindHost = process.env.DSH_DESKTOP_HOST ?? preferences.bind ?? '127.0.0.1'
+  const bindPort = process.env.DSH_DESKTOP_PORT ?? (preferences.port === undefined ? '0' : String(preferences.port))
+  const loopbackBind = bindHost.startsWith('127.') || bindHost === 'localhost' || bindHost === '::1'
+  const wildcardBind = bindHost === '0.0.0.0' || bindHost === '::'
+  if (!loopbackBind && !wildcardBind) {
+    throw new Error(`desktop host: DSH_DESKTOP_HOST=${bindHost} cannot serve the desktop window, whose dsh-app origin the browser-trust fence refuses on a non-loopback authority; use 0.0.0.0 to serve loopback, the LAN, and a VPN together`)
+  }
   const application = runProfile({
     environment: loadLayeredEnv('dsh'),
     profile: 'desktop',
     resolvedProfile: { profile, installAnchor },
     patchFiles: [],
-    args: ['--no-open', '--host', '127.0.0.1', '--port', '0'],
+    args: [
+      '--no-open',
+      '--host', bindHost,
+      '--port', bindPort,
+      ...wildcardBind ? ['--allow-lan'] : [],
+    ],
     ...(process.argv[5] === undefined ? {} : {
       packageManager: {
         command: process.execPath,

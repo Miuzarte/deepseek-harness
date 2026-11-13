@@ -1,14 +1,17 @@
 /**
- * Theme bootstrap row for the browser's pre-plugin interval. Each index
- * render embeds the current durable built-in preference, font sizes, and
- * font-family lists. Head CSS colors the document canvas before script
- * execution; the body script installs the palette selector and font variables
- * that the client presenters adopt.
+ * Theme bootstrap row for the browser's pre-plugin interval. Each index render
+ * embeds the deployment's durable built-in preference, font sizes, and
+ * font-family lists as the fallback; the body script prefers this browser's own
+ * `localStorage` override, so per-browser appearance applies before first paint.
+ * Head CSS colors the document canvas before script execution; the body script
+ * installs the palette selector and font variables that the client presenters
+ * adopt.
  */
 
 import type { IndexInjection } from '@deepseek-ai/dsh-host-webserver'
 import {
-  DEFAULT_FONT_SIZES, DEFAULT_PREFERENCE, FONT_ROLES, FONT_SIZE_SPECS, fontFamilyVariable, normalizeFontFamily,
+  DEFAULT_FONT_SIZES, DEFAULT_PREFERENCE, FONT_FAMILY_FIELDS, FONT_ROLES, FONT_SIZE_SPECS, LOCAL_THEME_STORAGE_KEY,
+  THEME_PREFERENCES, fontFamilyVariable, normalizeFontFamily,
   type FontFamilies, type FontSizes, type ThemePreference,
 } from './theme-settings.ts'
 
@@ -24,22 +27,66 @@ function bootThemeStyle(preference: ThemePreference): string {
   return `${light}@media(prefers-color-scheme:dark){${dark}}`
 }
 
-/** Build the body script that installs the palette selector and font variables. */
+/**
+ * Build the body script that prefers this browser's stored override, falls
+ * back per field to the embedded deployment values, and installs the palette
+ * selector plus font variables.
+ * @param preference - Deployment fallback built-in preference.
+ * @param fontSizes - Deployment fallback font sizes in px by role.
+ * @param fontFamilies - Deployment fallback font lists; each is normalized before embedding.
+ * @returns the script text for one index render.
+ */
 function bootThemeBodyScript(preference: ThemePreference, fontSizes: FontSizes, fontFamilies: FontFamilies): string {
-  const sizes = FONT_ROLES.map(role =>
-    `\n  document.body.style.setProperty(${JSON.stringify(FONT_SIZE_SPECS[role].variable)}, ${JSON.stringify(`${fontSizes[role]}px`)})`).join('')
-  const families = FONT_ROLES.flatMap((kind) => {
-    const list = normalizeFontFamily(fontFamilies[kind])
-    return list === '' ? [] : [`\n  document.body.style.setProperty(${JSON.stringify(fontFamilyVariable(kind))}, ${JSON.stringify(list)})`]
-  }).join('')
+  const familyFields = Object.fromEntries(FONT_ROLES.map(role => [role, FONT_FAMILY_FIELDS[role]]))
+  const familyVariables = Object.fromEntries(FONT_ROLES.map(role => [role, fontFamilyVariable(role)]))
+  const sizeSpecs = Object.fromEntries(FONT_ROLES.map(role => [role, {
+    field: FONT_SIZE_SPECS[role].field,
+    variable: FONT_SIZE_SPECS[role].variable,
+    min: FONT_SIZE_SPECS[role].min,
+    max: FONT_SIZE_SPECS[role].max,
+  }]))
   return `(() => {
-  const preference = ${JSON.stringify(preference)}
+  const fallbackPreference = ${JSON.stringify(preference)}
+  const fallbackSizes = ${JSON.stringify(fontSizes)}
+  const fallbackFamilies = ${JSON.stringify({
+    text: normalizeFontFamily(fontFamilies.text),
+    code: normalizeFontFamily(fontFamilies.code),
+    terminal: normalizeFontFamily(fontFamilies.terminal),
+  })}
+  const sizeSpecs = ${JSON.stringify(sizeSpecs)}
+  const familyFields = ${JSON.stringify(familyFields)}
+  const familyVariables = ${JSON.stringify(familyVariables)}
+  let stored
+  try {
+    const raw = localStorage.getItem(${JSON.stringify(LOCAL_THEME_STORAGE_KEY)})
+    stored = raw === null ? undefined : JSON.parse(raw)
+  } catch (_unreadable) {
+    stored = undefined
+  }
+  const local = stored !== null && typeof stored === 'object' && !Array.isArray(stored) ? stored : {}
+  const preference = ${JSON.stringify([...THEME_PREFERENCES])}.includes(local.preference)
+    ? local.preference
+    : fallbackPreference
   const systemDark = preference === 'system'
     && typeof matchMedia !== 'undefined'
     && matchMedia('(prefers-color-scheme: dark)').matches
   const dark = preference === 'dark' || systemDark
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
   document.documentElement.dataset.dsThemeSource = preference
-  document.body.toggleAttribute('data-ds-dark-theme', dark)${sizes}${families}
+  document.body.toggleAttribute('data-ds-dark-theme', dark)
+  document.body.style.backgroundColor = dark ? ${JSON.stringify(DARK_BACKGROUND)} : ${JSON.stringify(LIGHT_BACKGROUND)}
+  document.body.style.setProperty('--dsh-boot-bg', dark ? ${JSON.stringify(DARK_BACKGROUND)} : ${JSON.stringify(LIGHT_BACKGROUND)})
+  for (const role of ${JSON.stringify([...FONT_ROLES])}) {
+    const spec = sizeSpecs[role]
+    const storedSize = local[spec.field]
+    const px = Number.isInteger(storedSize) && storedSize >= spec.min && storedSize <= spec.max
+      ? storedSize
+      : fallbackSizes[role]
+    document.body.style.setProperty(spec.variable, px + 'px')
+    const storedFamily = local[familyFields[role]]
+    const family = typeof storedFamily === 'string' ? storedFamily : fallbackFamilies[role]
+    if (family !== '') document.body.style.setProperty(familyVariables[role], family)
+  }
 })()`
 }
 
@@ -47,9 +94,9 @@ function bootThemeBodyScript(preference: ThemePreference, fontSizes: FontSizes, 
  * Theme bootstrap rows: head CSS colors the document canvas before
  * first paint, then the body script installs the palette selector and font
  * size and font families before the shell mount and module script.
- * @param preference - Current Host-backed built-in preference.
- * @param fontSizes - Current Host-backed font sizes in px by role.
- * @param fontFamilies - Current Host-backed font lists; each is normalized before embedding.
+ * @param preference - Deployment fallback built-in preference.
+ * @param fontSizes - Deployment fallback font sizes in px by role.
+ * @param fontFamilies - Deployment fallback font lists; each is normalized before embedding.
  * @returns head and body script rows in execution order.
  */
 export function bootThemeInjections(

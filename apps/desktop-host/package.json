@@ -12,6 +12,7 @@
   ],
   "dependencies": {
     "koffi": "3.1.1",
+    "yaml": "^2.9.0",
     "@deepseek-ai/cordis": "workspace:~",
     "@deepseek-ai/dsh": "workspace:*",
     "@deepseek-ai/dsh-agent": "workspace:*",
@@ -22,6 +23,7 @@
     "@deepseek-ai/dsh-jobs": "workspace:*",
     "@deepseek-ai/dsh-schedule": "workspace:*",
     "@deepseek-ai/dsh-deepseek-account": "workspace:*",
+    "@deepseek-ai/dsh-home-paths": "workspace:*",
     "@deepseek-ai/dsh-workspace": "workspace:*",
     "@deepseek-ai/dsh-plugin-manager": "workspace:*"
   },

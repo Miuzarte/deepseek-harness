@@ -88,6 +88,17 @@ export function assertServiceableBashConfig(config: Config): void {
 }
 
 /**
+ * The bash executable this deployment runs. `DSH_BASH` lets a platform that
+ * ships bash outside PATH (an app bundle, a jniLib) name it; an unset or empty
+ * value keeps the ordinary PATH lookup.
+ * @returns the configured executable or `bash`.
+ */
+function shellExecutable(): string {
+  const configured = process.env.DSH_BASH
+  return configured !== undefined && configured !== '' ? configured : 'bash'
+}
+
+/**
  * Local bash executor over `ctx.subprocess`. Bounded output, spill files,
  * managed-range SIGTERM→SIGKILL escalation, and quiescence are the subprocess
  * service's mechanics; this executor supplies their configured budgets per spawn, so a
@@ -185,7 +196,7 @@ export class LocalBashExecutor extends ShellExecutor {
   }
 
   async execute(spec: ShellExecSpec): Promise<ShellExecution> {
-    return this.executeArgv(spec, ['bash', '-c', spec.command])
+    return this.executeArgv(spec, [shellExecutable(), '-c', spec.command])
   }
 
   /**

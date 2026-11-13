@@ -9,10 +9,16 @@ let rgPathPromise: Promise<string> | undefined
  * Resolve the packaged executable lazily, once per process. Single-file runtimes use an existing
  * `-rg` sidecar; Electron uses the unpacked ASAR path. Resolution failures reject
  * this call, not package loading. No system executable or remote fallback is used.
+ *
+ * `DSH_RG_PATH` lets a deployment that ships ripgrep itself (a platform with no
+ * `@vscode/ripgrep` build, an app bundle, a jniLib) name that binary; an unset or
+ * empty value keeps the packaged lookup.
  * @returns the packaged executable's absolute path.
  */
 export function resolveRgPath(): Promise<string> {
   rgPathPromise ??= Promise.resolve().then(async () => {
+    const configured = process.env.DSH_RG_PATH
+    if (configured !== undefined && configured !== '') return configured
     const executable = parse(process.execPath)
     const executableSidecar = process.platform === 'win32'
       ? join(executable.dir, `${executable.name}-rg.exe`)

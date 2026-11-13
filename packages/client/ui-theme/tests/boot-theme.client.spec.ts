@@ -3,7 +3,7 @@
 import { runInNewContext } from 'node:vm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bootThemeInjections } from '../src/boot-theme.ts'
-import type { FontSizes, ThemePreference } from '../src/theme-settings.ts'
+import { LOCAL_THEME_STORAGE_KEY, type FontSizes, type ThemePreference } from '../src/theme-settings.ts'
 
 const DARK_ATTRIBUTE = 'data-ds-dark-theme'
 
@@ -13,17 +13,21 @@ function mockSystemDark(matches: boolean): void {
 
 function executeBootstrap(preference?: ThemePreference, fontSizes?: FontSizes): void {
   for (const row of bootThemeInjections(preference, fontSizes)) {
-    if (row.kind === 'script') runInNewContext(row.text, { document, matchMedia: globalThis.matchMedia })
+    if (row.kind === 'script') runInNewContext(row.text, { document, matchMedia: globalThis.matchMedia, localStorage })
   }
 }
 
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  localStorage.clear()
   delete document.documentElement.dataset.dsThemeSource
   document.body.removeAttribute(DARK_ATTRIBUTE)
   for (const name of ['--dsh-content-font-size', '--dsh-code-font-size', '--dsh-terminal-font-size']) document.body.style.removeProperty(name)
   for (const kind of ['text', 'code', 'terminal']) document.body.style.removeProperty(`--dsh-font-family-${kind}`)
+  document.body.style.removeProperty('background-color')
+  document.body.style.removeProperty('--dsh-boot-bg')
+  document.body.style.removeProperty('color-scheme')
 })
 
 describe('theme bootstrap row', () => {
@@ -92,10 +96,51 @@ describe('theme bootstrap row', () => {
     mockSystemDark(false)
     const [, body] = bootThemeInjections('light', undefined, { text: 'Inter', code: '', terminal: 'MesloLGS NF</script>, monospace' })
     if (body?.kind !== 'script') throw new Error('theme body bootstrap row is not a script')
-    expect(body.text).not.toContain('<')
-    runInNewContext(body.text, { document, matchMedia: globalThis.matchMedia })
+    expect(body.text).not.toContain('</script')
+    runInNewContext(body.text, { document, matchMedia: globalThis.matchMedia, localStorage })
     expect(document.body.style.getPropertyValue('--dsh-font-family-text')).toBe('"Inter"')
     expect(document.body.style.getPropertyValue('--dsh-font-family-code')).toBe('')
     expect(document.body.style.getPropertyValue('--dsh-font-family-terminal')).toBe('"MesloLGS NF/script", monospace')
+  })
+
+  it('prefers this browser stored override over the embedded fallback', () => {
+    mockSystemDark(false)
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, JSON.stringify({
+      preference: 'dark',
+      fontSize: 17,
+      codeFontSize: 14,
+      terminalFontFamily: 'JetBrains Mono',
+    }))
+    executeBootstrap('light', { text: 12, code: 10, terminal: 10 })
+    expect(document.documentElement.dataset.dsThemeSource).toBe('dark')
+    expect(document.body.hasAttribute(DARK_ATTRIBUTE)).toBe(true)
+    expect(document.body.style.getPropertyValue('--dsh-content-font-size')).toBe('17px')
+    expect(document.body.style.getPropertyValue('--dsh-code-font-size')).toBe('14px')
+    expect(document.body.style.getPropertyValue('--dsh-terminal-font-size')).toBe('10px')
+    expect(document.body.style.getPropertyValue('--dsh-font-family-terminal')).toBe('JetBrains Mono')
+    // The canvas follows the stored palette instead of the Host fallback.
+    expect(document.body.style.backgroundColor).toBe('rgb(21, 21, 23)')
+  })
+
+  it('falls back per field when the stored override carries junk', () => {
+    mockSystemDark(false)
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, JSON.stringify({
+      preference: 'sepia',
+      fontSize: 99,
+      codeFontSize: 'large',
+      terminalFontFamily: 7,
+    }))
+    executeBootstrap('dark', { text: 16, code: 12, terminal: 11 })
+    expect(document.documentElement.dataset.dsThemeSource).toBe('dark')
+    expect(document.body.style.getPropertyValue('--dsh-content-font-size')).toBe('16px')
+    expect(document.body.style.getPropertyValue('--dsh-code-font-size')).toBe('12px')
+    expect(document.body.style.getPropertyValue('--dsh-terminal-font-size')).toBe('11px')
+  })
+
+  it('ignores an unreadable stored override', () => {
+    mockSystemDark(false)
+    localStorage.setItem(LOCAL_THEME_STORAGE_KEY, '{not json')
+    executeBootstrap('light', { text: 15, code: 11, terminal: 13 })
+    expect(document.body.style.getPropertyValue('--dsh-content-font-size')).toBe('15px')
   })
 })

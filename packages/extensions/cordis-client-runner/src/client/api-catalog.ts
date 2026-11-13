@@ -271,12 +271,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'setTheme(id: string): void',
-        description: 'Switch the theme preference — the only user preference write entry. Built-in preferences are written through the settings scope and every accepted value emits `theme/change`.',
+        description: 'Switch the theme preference — the only user preference write entry. Built-in preferences are stored in this browser and every accepted value emits `theme/change`.',
         parameters: [{ name: 'id', description: 'a registered theme id or `system`; unknown ids throw.' }],
       },
       {
         signature: 'setFontSize(role: FontRole, px: number): void',
-        description: 'Change one role\'s font size. Accepted values are written through the settings scope and emit `theme/change`.',
+        description: 'Change one role\'s font size. Accepted values are stored in this browser and emit `theme/change`.',
         parameters: [{ name: 'role', description: 'font role.' }, { name: 'px', description: 'integer px within the role\'s `FONT_SIZE_SPECS` range; out-of-range or fractional values throw.' }],
       },
       {
