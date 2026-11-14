@@ -195,6 +195,8 @@ pwsh -File .uild-desktop.ps1 -DryRun    # 只看它会跑什么
 ./build-server.sh --dry-run                 # 只看它会跑什么
 ```
 
+CUA helper 是单独编译的 .NET 程序（`net10.0-windows10.0.19041`）。`build-desktop.ps1` 默认先跑 `pnpm --filter @deepseek-ai/dsh-cua-windows run build:native:x64`，把 `native/bin/win-x64/dsh-cua-windows.exe` 放进包里再打包，所以本机要装 **.NET 10 SDK**（只有 9.x 时 `dotnet publish` 报 `NETSDK1045`）。上游打包流程只给 macOS helper 接了下发步骤，Windows 这条必须本地编译：不编译就打包，产物里的 `cua-windows` 插件激活时报 `ENOENT … nativein\win-x64\dsh-cua-windows.exe`。`-SkipCua` 跳过这一步，等价于接受该报错。
+
 `build-desktop.ps1` 的代理取值顺序是 `-Proxy` → `DSH_BUILD_PROXY` → `HTTPS_PROXY` → 本机 7890 在监听时用 `http://127.0.0.1:7890`；`-NoProxy` 强制直连。设好代理后脚本一并导出 `NODE_USE_ENV_PROXY`、`ELECTRON_GET_USE_PROXY` 和 `GLOBAL_AGENT_*`，这几类变量是 Electron / Node / Python 运行时下载能走代理的前提（见 §9 最后一段）。
 
 ## 服务器 / 新机器上同步

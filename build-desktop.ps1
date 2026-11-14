@@ -22,6 +22,10 @@ that port is listening.
 .PARAMETER NoProxy
 Send downloads directly even when a proxy is configured or detected.
 
+.PARAMETER SkipCua
+Pack without the Windows Computer Use helper. The shipped plugin then fails at
+activation with ENOENT, so prefer installing the .NET 10 SDK instead.
+
 .PARAMETER DryRun
 Print the resolved configuration and planned commands without running them.
 
@@ -37,6 +41,7 @@ param(
   [switch]$SkipInstall,
   [switch]$NoProxy,
   [string]$Proxy,
+  [switch]$SkipCua,
   [switch]$DryRun
 )
 
@@ -120,6 +125,37 @@ if (-not (Test-Path $settingsFile)) {
 # Git Bash's GNU tar reads B:\ as a remote host; System32 ships bsdtar instead.
 $env:Path = "$env:SystemRoot\System32;$env:Path"
 
+# --- Windows Computer Use helper -------------------------------------------
+
+# The provider compiles this payload only from a source checkout. A packed app
+# resolves a prebuilt executable under its own package, so the helper has to
+# exist before packing or the shipped CUA plugin fails with ENOENT.
+$cuaHelper = Join-Path $repoRoot 'packages\experimental\cua-windows\native\bin\win-x64\dsh-cua-windows.exe'
+$cuaBuild = $false
+if (-not $SkipCua) {
+  $sdkMajor = $null
+  if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+    $sdks = & dotnet --list-sdks 2>$null
+    if ($LASTEXITCODE -eq 0 -and $sdks) {
+      $sdkMajor = ($sdks | ForEach-Object { [int](($_ -split '\s+')[0].Split('.')[0]) } | Measure-Object -Maximum).Maximum
+    }
+  }
+  if ($null -eq $sdkMajor -or $sdkMajor -lt 10) {
+    $found = if ($null -eq $sdkMajor) { 'none' } else { "$sdkMajor.x" }
+    $message = "the Windows Computer Use helper needs the .NET 10 SDK (found: $found); install Microsoft.DotNet.SDK.10, or pass -SkipCua to pack without the helper"
+    if ($DryRun) { Write-Warning $message } else { throw $message }
+  }
+  $cuaBuild = -not (Test-Path $cuaHelper)
+  if (-not $cuaBuild) {
+    $helperTime = (Get-Item $cuaHelper).LastWriteTimeUtc
+    $nativeRoot = Join-Path $repoRoot 'packages\experimental\cua-windows\native'
+    $newest = Get-ChildItem $nativeRoot -Recurse -File |
+      Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } |
+      Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    $cuaBuild = $null -ne $newest -and $newest.LastWriteTimeUtc -gt $helperTime
+  }
+}
+
 # --- Steps -----------------------------------------------------------------
 
 $packageArgs = if ($Dir) {
@@ -131,6 +167,7 @@ $packageArgs = if ($Dir) {
 if ($DryRun) {
   Write-Host "node:  $nodeVersion"
   Write-Host "proxy: $(if ($proxyUrl) { $proxyUrl } else { 'none' })"
+  Write-Host "cua:   $(if ($SkipCua) { 'skipped (-SkipCua)' } elseif ($cuaBuild) { 'would build the helper' } else { 'helper up to date' })"
   if (-not $SkipInstall) { Write-Host 'would run: pnpm install --frozen-lockfile' }
   Write-Host "would run: pnpm $($packageArgs -join ' ')"
   exit 0
@@ -148,6 +185,15 @@ if (-not $SkipInstall) {
     if ($previousCi) { $env:CI = $previousCi } else { Remove-Item Env:CI -ErrorAction SilentlyContinue }
   }
   if ($installExit -ne 0) { throw "pnpm install failed with exit code $installExit" }
+}
+
+if ($SkipCua) {
+  Write-Warning 'packing without the Windows Computer Use helper: the shipped cua-windows plugin fails at activation'
+} elseif ($cuaBuild) {
+  Write-Host '==> pnpm --filter @deepseek-ai/dsh-cua-windows run build:native:x64'
+  & pnpm --filter '@deepseek-ai/dsh-cua-windows' run build:native:x64
+  if ($LASTEXITCODE -ne 0) { throw "the Windows Computer Use helper build failed with exit code $LASTEXITCODE" }
+  if (-not (Test-Path $cuaHelper)) { throw "the helper build finished without $cuaHelper" }
 }
 
 Write-Host "==> pnpm $($packageArgs -join ' ')"
